@@ -1,13 +1,54 @@
 /**
- * MemeScanner — Shared Utilities
- * Parsing helpers used by both content scripts and background worker.
+ * MemeScanner Pro V3 — Shared Architectural Utilities
+ * 
+ * - Standardized Selector Schema for multi-platform resilience
+ * - High-precision numerical parsing
+ * - Filter engine V3 with extended metric support
  */
 
 const MemeUtils = (() => {
+  'use strict';
+
+  // ───────────────────────────────────────────────────────────────
+  //  DYNAMIC SELECTOR SCHEMA (V3.2)
+  // ───────────────────────────────────────────────────────────────
+  
+  const SELECTORS = {
+    axiom: {
+      container: 'section[aria-label="Table content"] div[style*="height"]',
+      row: 'div[data-index]',
+      ticker: 'span[class*="text-textPrimary"] div.truncate',
+      name: 'div[role="button"] span div.truncate',
+      age: 'span[class*="text-primaryGreen"]',
+      marketCap: 'span[class*="text-textPrimary"]',
+      mcChange: 'span[class*="font-GeistMono"]'
+    },
+    gmgn: {
+      container: '#GlobalScrollDomId div[data-index]',
+      row: 'div[data-index]',
+      ticker: '.ticker',
+      name: '.name'
+    }
+  };
+
   /**
-   * Parse age string to seconds.
-   * Examples: "0s" → 0, "30s" → 30, "5m" → 300, "2h" → 7200, "1d" → 86400
+   * Safe DOM Query Utility with Error Boundaries.
    */
+  function safeQuery(parent, selector, label = 'Unknown') {
+    try {
+      const el = parent.querySelector(selector);
+      if (!el) throw new Error(`Selector "${selector}" not found for ${label}`);
+      return el;
+    } catch (err) {
+      // In a production environment, this would log to a central telemetry system
+      return null;
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────
+  //  NUMERICAL PARSING
+  // ───────────────────────────────────────────────────────────────
+
   function parseAge(text) {
     if (!text || typeof text !== 'string') return Infinity;
     const cleaned = text.trim().toLowerCase();
@@ -24,10 +65,6 @@ const MemeUtils = (() => {
     }
   }
 
-  /**
-   * Parse value string to a raw number.
-   * Examples: "$1.2K" → 1200, "$5M" → 5000000, "500" → 500, "$123" → 123
-   */
   function parseValue(text) {
     if (!text || typeof text !== 'string') return 0;
     const cleaned = text.trim().replace(/[$,]/g, '').toUpperCase();
@@ -44,108 +81,77 @@ const MemeUtils = (() => {
     }
   }
 
-  /**
-   * Parse transaction count text. Handles "1.2K" style.
-   */
-  function parseTxCount(text) {
-    return parseValue(text);
-  }
+  // ───────────────────────────────────────────────────────────────
+  //  FILTER ENGINE V3
+  // ───────────────────────────────────────────────────────────────
 
-  /**
-   * Check if a token matches the given filter configuration.
-   * Returns { passed: boolean, reasons: string[] }
-   */
   function matchesFilters(token, filters) {
     const reasons = [];
+    if (!filters.enabled) return { passed: true, reasons: [] };
 
-    // Age filter: token must be younger than maxAge
-    if (filters.maxAge !== undefined && filters.maxAge > 0) {
-      const ageSeconds = parseAge(token.age);
-      if (ageSeconds > filters.maxAge) {
-        reasons.push(`Age ${token.age} exceeds max ${filters.maxAge}s`);
+    const tokenSearchText = `${token.ticker || ''} ${token.name || ''}`.toLowerCase();
+
+    if (Array.isArray(filters.searchKeywords) && filters.searchKeywords.length > 0) {
+      const matchesSearch = filters.searchKeywords.some((kw) => tokenSearchText.includes(String(kw).toLowerCase()));
+      if (!matchesSearch) reasons.push('Search keywords not matched');
+    }
+
+    if (Array.isArray(filters.excludeKeywords) && filters.excludeKeywords.length > 0) {
+      const hasExcluded = filters.excludeKeywords.some((kw) => tokenSearchText.includes(String(kw).toLowerCase()));
+      if (hasExcluded) reasons.push('Excluded keyword matched');
+    }
+
+    // Protocol Check
+    if (filters.protocols) {
+      const platform = (token.platform || '').toLowerCase().replace(/\s+/g, '');
+      const protoKey = platform === 'believe' ? 'launchACoin' : platform;
+      if (filters.protocols[protoKey] === false) {
+        reasons.push(`Protocol ${token.platform} disabled`);
       }
     }
 
-    // Volume filter
-    if (filters.minVolume !== undefined && filters.minVolume > 0) {
-      const vol = parseValue(token.volume);
-      if (vol < filters.minVolume) {
-        reasons.push(`Volume ${token.volume} below min $${filters.minVolume}`);
-      }
-    }
-
-    // Market cap filter
-    if (filters.minMC !== undefined && filters.minMC > 0) {
-      const mc = parseValue(token.marketCap);
-      if (mc < filters.minMC) {
-        reasons.push(`MC ${token.marketCap} below min $${filters.minMC}`);
-      }
-    }
-
-    // Transaction count filter
-    if (filters.minTX !== undefined && filters.minTX > 0) {
-      const tx = parseTxCount(token.transactions);
-      if (tx < filters.minTX) {
-        reasons.push(`TX ${token.transactions} below min ${filters.minTX}`);
-      }
-    }
-
-    return {
-      passed: reasons.length === 0,
-      reasons
+    // Range Validation Utility
+    const validateRange = (val, range, label) => {
+      if (!range) return;
+      const num = typeof val === 'string' ? parseValue(val) : val;
+      if (range.min && num < range.min) reasons.push(`${label} ${val} < ${range.min}`);
+      if (range.max && num > range.max) reasons.push(`${label} ${val} > ${range.max}`);
     };
+
+    // Age unit-aware check
+    if (filters.age) {
+      let ageSec = parseAge(token.age);
+      let minS = (filters.age.min || 0) * (filters.age.unit === 'minutes' ? 60 : (filters.age.unit === 'hours' ? 3600 : 1));
+      let maxS = (filters.age.max || 0) * (filters.age.unit === 'minutes' ? 60 : (filters.age.unit === 'hours' ? 3600 : 1));
+      if (minS > 0 && ageSec < minS) reasons.push(`Age < ${filters.age.min}${filters.age.unit}`);
+      if (maxS > 0 && ageSec > maxS) reasons.push(`Age > ${filters.age.max}${filters.age.unit}`);
+    }
+
+    validateRange(token.marketCap, filters.marketCap, 'MC');
+    validateRange(token.liquidity, filters.liquidity, 'Liq');
+    validateRange(token.volume, filters.volume, 'Vol');
+    validateRange(token.holders, filters.holdersCount, 'Holders');
+    validateRange(token.topHolders, filters.top10Holders, 'Top10');
+    validateRange(token.bundlePct, filters.bundlersPercentage, 'Bundlers');
+
+    return { passed: reasons.length === 0, reasons };
   }
 
-  /**
-   * Format a timestamp for logging.
-   */
-  function formatTimestamp(date) {
-    const d = date || new Date();
-    return d.toLocaleTimeString('en-US', { hour12: false }) + '.' +
-      String(d.getMilliseconds()).padStart(3, '0');
-  }
-
-  /**
-   * Generate a unique key for a token (used for deduplication).
-   */
-  function tokenKey(token) {
-    return token.tokenPath || token.ticker || '';
-  }
-
-  /**
-   * Throttle a function to execute at most once every `delay` ms.
-   */
-  function throttle(fn, delay) {
-    let lastCall = 0;
-    let timer = null;
-    return function (...args) {
-      const now = Date.now();
-      const remaining = delay - (now - lastCall);
-      if (remaining <= 0) {
-        lastCall = now;
-        fn.apply(this, args);
-      } else if (!timer) {
-        timer = setTimeout(() => {
-          lastCall = Date.now();
-          timer = null;
-          fn.apply(this, args);
-        }, remaining);
-      }
-    };
+  function formatTimestamp(ms) {
+    const d = ms ? new Date(ms) : new Date();
+    return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
   }
 
   return {
+    SELECTORS,
+    safeQuery,
     parseAge,
     parseValue,
-    parseTxCount,
     matchesFilters,
-    formatTimestamp,
-    tokenKey,
-    throttle
+    formatTimestamp
   };
 })();
 
-// Make available in both content script and service worker contexts
-if (typeof globalThis !== 'undefined') {
-  globalThis.MemeUtils = MemeUtils;
-}
+// Bridge for SW and CS
+if (typeof globalThis !== 'undefined') globalThis.MemeUtils = MemeUtils;
+if (typeof module !== 'undefined') module.exports = MemeUtils;

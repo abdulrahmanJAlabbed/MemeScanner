@@ -1,0 +1,33 @@
+{
+  "updateIntervalMs": 250,
+  "debounceMs": 140,
+  "maxTokensPerBatch": 120,
+  "platformPresets": {
+    "axiom": {
+      "hosts": ["axiom.trade"],
+      "listContainer": "section[aria-label='Table content']",
+      "row": "div[data-index]",
+      "fields": {
+        "ticker": "div.truncate",
+        "age": "span[class*='text-primaryGreen']",
+        "marketCap": "span[class*='text-textPrimary']",
+        "liquidity": "span[class*='text-textPrimary']",
+        "volume": "span[class*='text-textPrimary']"
+      },
+      "auditRules": ["honeypot", "mintAuthorityEnabled", "freezeAuthorityEnabled"]
+    },
+    "gmgn": {
+      "hosts": ["gmgn.ai"],
+      "listContainer": "#GlobalScrollDomId",
+      "row": "div[data-index]",
+      "fields": {
+        "ticker": ".ticker",
+        "age": ".age",
+        "marketCap": ".mc",
+        "liquidity": ".liq",
+        "volume": ".volume"
+      },
+      "auditRules": ["honeypot", "mintAuthorityEnabled"]
+    }
+  }
+}

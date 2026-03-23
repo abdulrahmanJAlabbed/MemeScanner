@@ -2,194 +2,114 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MemeScanner</title>
+  <title>MemeScanner Pro</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-
-  <!-- Header -->
-  <header class="header">
-    <div class="header-left">
-      <div class="logo">🔬</div>
-      <h1>Meme<span>Scanner</span></h1>
+  <header class="topbar glass">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="MemeScanner Pro" class="brand-icon">
+      <div>
+        <h1>MEMESCANNER PRO</h1>
+        <p id="uptime" class="mono">00:00:00</p>
+      </div>
     </div>
-    <button id="toggleBtn" class="toggle-btn" title="Toggle Scanner">
-      <span class="toggle-dot"></span>
-    </button>
+    <div class="topbar-right">
+      <button id="toggleScanner" class="toggle" aria-label="Toggle scanner" aria-pressed="true">
+        <span class="track"><span class="thumb"></span></span>
+      </button>
+    </div>
   </header>
 
-  <!-- Quick Links Bar -->
-  <div class="quick-links" id="quickLinks">
-    <a class="quick-link" data-url="https://axiom.trade/discover?chain=sol" title="Axiom Trade">
-      <span class="quick-link-icon">⚡</span>
-      <span class="quick-link-label">Axiom</span>
-    </a>
-    <a class="quick-link" data-url="https://gmgn.ai/?chain=sol" title="GMGN">
-      <span class="quick-link-icon">🧠</span>
-      <span class="quick-link-label">GMGN</span>
-    </a>
-    <a class="quick-link" data-url="https://photon-sol.tinyastro.io/" title="Photon">
-      <span class="quick-link-icon">☀️</span>
-      <span class="quick-link-label">Photon</span>
-    </a>
-    <a class="quick-link" data-url="https://pump.fun/" title="PumpFun">
-      <span class="quick-link-icon">🎰</span>
-      <span class="quick-link-label">Pump</span>
-    </a>
-    <a class="quick-link" data-url="https://dexscreener.com/solana" title="DexScreener">
-      <span class="quick-link-icon">📊</span>
-      <span class="quick-link-label">DexS</span>
-    </a>
-    <a class="quick-link" data-url="https://bullx.io/" title="BullX">
-      <span class="quick-link-icon">🐂</span>
-      <span class="quick-link-label">BullX</span>
-    </a>
-    <a class="quick-link" data-url="https://jup.ag/" title="Jupiter">
-      <span class="quick-link-icon">🪐</span>
-      <span class="quick-link-label">Jup</span>
-    </a>
-    <a class="quick-link" data-url="https://solscan.io/" title="Solscan">
-      <span class="quick-link-icon">🔍</span>
-      <span class="quick-link-label">Solscan</span>
-    </a>
-  </div>
+  <section class="hud mono glass">
+    <article><span>SCANNED</span><strong id="hudScanned">0</strong></article>
+    <article><span>MATCHED</span><strong id="hudMatched" class="good">0</strong></article>
+    <article><span>REJECTED</span><strong id="hudRejected" class="bad">0</strong></article>
+    <article><span>WATCHED</span><strong id="hudWatch">0</strong></article>
+  </section>
 
-  <!-- Stats Bar -->
-  <div class="stats-bar">
-    <div class="stat">
-      <span class="stat-value" id="statScanned">0</span>
-      <span class="stat-label">Scanned</span>
-    </div>
-    <div class="stat stat-matched">
-      <span class="stat-value" id="statMatched">0</span>
-      <span class="stat-label">Matched</span>
-    </div>
-    <div class="stat stat-rejected">
-      <span class="stat-value" id="statRejected">0</span>
-      <span class="stat-label">Rejected</span>
-    </div>
-    <div class="stat stat-watching">
-      <span class="stat-value" id="statWatching">0</span>
-      <span class="stat-label">Live</span>
-    </div>
-  </div>
-
-  <!-- Tabs -->
-  <nav class="tabs">
-    <button class="tab active" data-tab="live">Live <span class="tab-badge" id="liveBadge">0</span></button>
-    <button class="tab" data-tab="matched">Matched <span class="tab-badge green" id="matchBadge">0</span></button>
-    <button class="tab" data-tab="config">Config</button>
-    <button class="tab" data-tab="logs">Log</button>
+  <nav class="tabs" id="tabsNav">
+    <button class="tab active" data-tab="feed">Feed <em id="badgeFeed">0</em></button>
+    <button class="tab" data-tab="watchlist">Watch <em id="badgeWatch">0</em></button>
+    <button class="tab" data-tab="settings">Settings</button>
+    <button class="tab" data-tab="logs">Logs</button>
   </nav>
 
-  <!-- Tab: Live Feed — All visible tokens -->
-  <div class="tab-content active" id="tab-live">
-    <div id="liveList" class="token-list">
-      <div class="empty-state">
-        <span class="empty-icon">📡</span>
-        <p>No tokens detected yet</p>
-        <p class="empty-sub">Navigate to a supported site to start scanning</p>
+  <main class="workspace">
+    <section id="tab-feed" class="tab-panel active">
+      <div class="panel-head">
+        <h2>Live Market Feed</h2>
+        <button class="ghost" data-clear="feed">Clear</button>
       </div>
-    </div>
-  </div>
+      <div id="feedList" class="list"></div>
+    </section>
 
-  <!-- Tab: Matched Tokens -->
-  <div class="tab-content" id="tab-matched">
-    <div id="matchedList" class="token-list">
-      <div class="empty-state">
-        <span class="empty-icon">🎯</span>
-        <p>No matches yet</p>
-        <p class="empty-sub">Set filters in Config tab to start matching</p>
+    <section id="tab-watchlist" class="tab-panel">
+      <div class="panel-head">
+        <h2>Smart Watchlist</h2>
+        <button class="ghost" data-clear="watchlist">Clear</button>
       </div>
-    </div>
-  </div>
+      <div id="watchList" class="list"></div>
+    </section>
 
-  <!-- Tab: Config -->
-  <div class="tab-content" id="tab-config">
-    <form id="configForm">
+    <section id="tab-settings" class="tab-panel">
+      <div class="settings-card glass">
+        <h2>Extension UX</h2>
 
-      <!-- Selector Presets -->
-      <div class="config-section">
-        <div class="config-section-title">Site Preset</div>
-        <div class="preset-btns">
-          <button type="button" class="preset-btn active" data-preset="axiom">⚡ Axiom</button>
-          <button type="button" class="preset-btn" data-preset="gmgn">🧠 GMGN</button>
-          <button type="button" class="preset-btn" data-preset="custom">🔧 Custom</button>
-        </div>
+        <label class="field">
+          <span>Live Items Per View (higher = zoom out page)</span>
+          <select id="liveItemsTarget">
+            <option value="10">10 (default)</option>
+            <option value="14">14</option>
+            <option value="18">18</option>
+            <option value="22">22</option>
+            <option value="26">26</option>
+            <option value="30">30</option>
+            <option value="33">33 (max zoom out)</option>
+          </select>
+        </label>
+
+        <label class="check-field">
+          <input id="showAdvancedData" type="checkbox">
+          <span>Show full coin details (holders, bundlers, dev/sniper/bot stats, TXNS)</span>
+        </label>
+
+        <label class="check-field">
+          <input id="launchPinned" type="checkbox">
+          <span>Open Axiom / GMGN / Pump in pinned tab</span>
+        </label>
+
+        <label class="check-field">
+          <input id="launchInBackground" type="checkbox">
+          <span>Open in background (do not switch to the website tab)</span>
+        </label>
+
+        <button id="saveSettings" class="primary">Apply Settings</button>
       </div>
+    </section>
 
-      <!-- Container Selector -->
-      <div class="config-section">
-        <div class="config-section-title">Container Selector</div>
-        <div class="filter-group full-width">
-          <textarea id="containerSelector" placeholder="CSS selector for the token list container, e.g. #platform-layout-container section > div > div" rows="3"></textarea>
-          <span class="filter-hint">The parent element containing all token rows</span>
-        </div>
-        <div class="filter-group full-width" style="margin-top: 6px;">
-          <label>Row Selector</label>
-          <input type="text" id="rowSelector" placeholder="div[data-index]">
-          <span class="filter-hint">Selector for individual token rows inside the container</span>
-        </div>
+    <section id="tab-logs" class="tab-panel">
+      <div class="panel-head">
+        <h2>Runtime Logs</h2>
+        <button class="ghost" data-clear="logs">Clear</button>
       </div>
+      <div id="logsList" class="logs mono"></div>
+    </section>
+  </main>
 
-      <!-- Filters -->
-      <div class="config-section">
-        <div class="config-section-title">Filters</div>
-        <div class="filter-grid">
-          <div class="filter-group">
-            <label>Max Age (sec)</label>
-            <input type="number" id="maxAge" placeholder="0 = off" min="0">
-          </div>
-          <div class="filter-group">
-            <label>Min Volume ($)</label>
-            <input type="number" id="minVolume" placeholder="0 = off" min="0">
-          </div>
-          <div class="filter-group">
-            <label>Min Market Cap ($)</label>
-            <input type="number" id="minMC" placeholder="0 = off" min="0">
-          </div>
-          <div class="filter-group">
-            <label>Min Transactions</label>
-            <input type="number" id="minTX" placeholder="0 = off" min="0">
-          </div>
-        </div>
-      </div>
-
-      <!-- Behavior -->
-      <div class="config-section">
-        <div class="config-section-title">Behavior</div>
-        <div class="switch-row">
-          <label for="autoOpen">Auto-open matched tokens</label>
-          <input type="checkbox" id="autoOpen">
-        </div>
-        <div class="filter-group" style="margin-top: 6px;">
-          <label>Max open tabs</label>
-          <input type="number" id="maxTabs" placeholder="5" min="1" max="15">
-        </div>
-      </div>
-
-      <button type="submit" class="save-btn">💾 Save Configuration</button>
-    </form>
-  </div>
-
-  <!-- Tab: Logs -->
-  <div class="tab-content" id="tab-logs">
-    <div id="logList" class="log-list">
-      <div class="empty-state">
-        <span class="empty-icon">📝</span>
-        <p>No activity yet</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <footer class="footer">
-    <div class="footer-status">
-      <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">Idle</span>
-    </div>
-    <span id="uptime">0s</span>
+  <footer class="dock glass">
+    <button class="dock-link" data-url="https://axiom.trade" title="Open Axiom">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 12 3l8 9-8 9z"/></svg>
+      <span>AXIOM</span>
+    </button>
+    <button class="dock-link" data-url="https://gmgn.ai" title="Open GMGN">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h8v8H3zM13 10h8v8h-8zM13 3h8v5h-8z"/></svg>
+      <span>GMGN</span>
+    </button>
+    <button class="dock-link" data-url="https://pump.fun" title="Open Pump">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17V7h2v8h4v2zM13 17V7h2v8h4v2z"/></svg>
+      <span>PUMP</span>
+    </button>
   </footer>
 
   <script src="popup.js"></script>

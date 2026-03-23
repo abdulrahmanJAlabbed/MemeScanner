@@ -1,388 +1,754 @@
 /**
- * MemeScanner — Background Service Worker (The Brain)
- * 
- * Central coordinator:
- * - Receives token data from Primary Observer (content-router.js on main feed)
- * - Deduplicates tokens
- * - Runs filter engine against user-configured criteria
- * - Opens matching tokens in new background tabs
- * - Receives secondary data from token detail page observers
- * - Manages tab lifecycle and cleanup
- * - Provides state to the Popup UI
+ * MemeScanner Pro — MV3 service worker.
+ *
+ * MV3 choice notes:
+ * 1) No long-lived in-memory source of truth: all critical state is in chrome.storage.local.
+ * 2) Every message is processed independently so worker suspension does not corrupt state.
+ * 3) Uptime is derived from timestamps (not setInterval), which remains accurate across sleep/wake.
  */
 
 importScripts('utils.js');
 
-// ═══════════════════════════════════════════════════════════════════
-//  STATE
-// ═══════════════════════════════════════════════════════════════════
-
-const state = {
-  // All tokens ever seen: tokenPath → tokenData
-  seenTokens: new Map(),
-
-  // Tokens that passed filters: tokenPath → { token, tabId, status, detailData }
-  watchedTokens: new Map(),
-
-  // Tokens rejected by filters (kept for stats): tokenPath → { token, reasons }
-  rejectedTokens: new Map(),
-
-  // Activity log (circular buffer, max 200 entries)
-  logs: [],
-
-  // Stats
-  stats: {
-    totalScanned: 0,
-    totalMatched: 0,
-    totalRejected: 0,
-    startedAt: Date.now()
-  },
-
-  // Filter config (loaded from storage on init)
-  filters: {
-    maxAge: 0,          // 0 = disabled (shows all ages)
-    minVolume: 0,       // Minimum volume in USD (0 = disabled)
-    minMC: 0,           // Minimum market cap in USD (0 = disabled)
-    minTX: 0,           // Minimum transaction count (0 = disabled)
-    autoOpen: false,    // Don't auto-open until user enables it
-    maxTabs: 5,         // Max simultaneous monitored tabs
-    enabled: true       // Master on/off switch
-  }
+const KEYS = {
+  settings: 'settings',
+  hud: 'hud',
+  watchlist: 'watchlist',
+  positions: 'positions',
+  marketFeed: 'marketFeed',
+  logs: 'logs',
+  trackedTabs: 'trackedTabs'
 };
 
 const MAX_LOGS = 200;
+const MAX_FEED_ITEMS = 220;
+const openPlatformLocks = new Map();
+const SCAN_ALARM = 'memeScannerScanKick';
 
-// ═══════════════════════════════════════════════════════════════════
-//  INITIALIZATION
-// ═══════════════════════════════════════════════════════════════════
-
-async function init() {
-  log('🚀 MemeScanner background worker started');
-
-  // Load saved filters
-  try {
-    const stored = await chrome.storage.local.get(['filters', 'stats']);
-    if (stored.filters) {
-      Object.assign(state.filters, stored.filters);
-      log('📋 Loaded saved filters');
-    }
-    if (stored.stats) {
-      state.stats.totalScanned = stored.stats.totalScanned || 0;
-      state.stats.totalMatched = stored.stats.totalMatched || 0;
-      state.stats.totalRejected = stored.stats.totalRejected || 0;
-    }
-  } catch (err) {
-    log('⚠️ Could not load saved filters, using defaults');
+const DEFAULT_SETTINGS = {
+  enabled: true,
+  refreshMs: 700,
+  defaultPositionUsd: 100,
+  showAdvancedData: true,
+  liveItemsTarget: 10,
+  launchPinned: false,
+  launchInBackground: false,
+  filters: {
+    searchKeywords: [],
+    excludeKeywords: [],
+    protocols: {
+      pump: true,
+      raydium: true,
+      moonshot: true,
+      mayhem: true,
+      bags: true,
+      virtualCurve: true
+    },
+    age: { min: 0, max: 120, unit: 'minutes' },
+    marketCap: { min: 0, max: 0 },
+    liquidity: { min: 0, max: 0 },
+    volume: { min: 0, max: 0 }
   }
-}
+};
 
-init();
+const DEFAULT_HUD = {
+  totalScanned: 0,
+  totalMatched: 0,
+  totalRejected: 0,
+  feedCount: 0,
+  openPositions: 0,
+  watchCount: 0,
+  startedAt: Date.now(),
+  lastActiveAt: Date.now(),
+  uptimeSeconds: 0
+};
 
-// ═══════════════════════════════════════════════════════════════════
-//  MESSAGE HANDLERS
-// ═══════════════════════════════════════════════════════════════════
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  switch (message.type) {
-    case 'NEW_TOKENS':
-      handleNewTokens(message.tokens);
-      break;
-
-    case 'SECONDARY_DATA':
-      handleSecondaryData(message.tokenPath, message.data);
-      break;
-
-    case 'SECONDARY_TAB_READY':
-      handleSecondaryTabReady(message.tokenPath, sender.tab?.id);
-      break;
-
-    case 'GET_STATE':
-      sendResponse(getPublicState());
-      return true; // Keep channel open for async response
-
-    case 'UPDATE_FILTERS':
-      updateFilters(message.filters);
-      sendResponse({ success: true });
-      return true;
-
-    case 'TOGGLE_ENABLED':
-      state.filters.enabled = !state.filters.enabled;
-      saveFilters();
-      log(state.filters.enabled ? '▶️ Scanner enabled' : '⏸️ Scanner paused');
-      sendResponse({ enabled: state.filters.enabled });
-      return true;
-
-    case 'CLOSE_WATCHED':
-      closeWatchedToken(message.tokenPath);
-      sendResponse({ success: true });
-      return true;
-
-    case 'GET_LOGS':
-      sendResponse({ logs: state.logs.slice(-50) });
-      return true;
-
-    default:
-      break;
-  }
+chrome.runtime.onInstalled.addListener(async () => {
+  const current = await chrome.storage.local.get(Object.values(KEYS));
+  await chrome.storage.local.set({
+    [KEYS.settings]: current[KEYS.settings] || DEFAULT_SETTINGS,
+    [KEYS.hud]: current[KEYS.hud] || DEFAULT_HUD,
+    [KEYS.watchlist]: current[KEYS.watchlist] || {},
+    [KEYS.positions]: current[KEYS.positions] || {},
+    [KEYS.marketFeed]: current[KEYS.marketFeed] || {},
+    [KEYS.logs]: current[KEYS.logs] || [],
+    [KEYS.trackedTabs]: current[KEYS.trackedTabs] || {}
+  });
+  ensureScanAlarm(true);
+  await adoptExistingPlatformTabs();
+  await appendLog('MemeScanner Pro initialized (MV3).');
 });
 
-// ═══════════════════════════════════════════════════════════════════
-//  CORE LOGIC
-// ═══════════════════════════════════════════════════════════════════
+chrome.runtime.onStartup.addListener(async () => {
+  const { settings } = await getState();
+  ensureScanAlarm(!!settings.enabled);
+  await adoptExistingPlatformTabs();
+  await kickTrackedTabs();
+});
 
-function handleNewTokens(tokens) {
-  if (!state.filters.enabled) return;
-
-  let newCount = 0;
-  let updateCount = 0;
-  let matchCount = 0;
-
-  tokens.forEach(token => {
-    const key = token.contractAddress || token.ticker || MemeUtils.tokenKey(token);
-    if (!key) return;
-
-    const isUpdate = token._updateType === 'UPDATED';
-    delete token._updateType;
-
-    if (isUpdate) {
-      updateCount++;
-      state.seenTokens.set(key, token);
-    } else {
-      if (state.seenTokens.has(key)) return;
-      newCount++;
-      state.seenTokens.set(key, token);
-      state.stats.totalScanned++;
-    }
-
-    // Build audit summary
-    const auditFlags = [];
-    if (token.topHoldersRisk) auditFlags.push(`Top:${token.topHolders}`);
-    if (token.insiderRisk) auditFlags.push(`Ins:${token.insiderPct}`);
-    if (token.sniperRisk) auditFlags.push(`Snp:${token.sniperPct}`);
-    if (token.botRisk) auditFlags.push(`Bot:${token.botPct}`);
-    if (token.bundleRisk) auditFlags.push(`Bnd:${token.bundlePct}`);
-    if (token.dexPaidRisk) auditFlags.push('DEX:Unpaid');
-    const auditStr = auditFlags.length > 0 ? ` | ⚠️ ${auditFlags.join(', ')}` : ' | ✅ Clean';
-
-    // Log every token with all data
-    log(`🪙 ${token.ticker || '???'} (${token.name || '—'}) | Age: ${token.age || '?'} | MC: ${token.marketCap || '?'} ${token.mcChange || ''} | Liq: ${token.liquidity || '?'} | Vol: ${token.volume || '?'} | TX: ${token.txTotal || '?'} (${token.txBuys || '?'}/${token.txSells || '?'}) | 👥${token.holders || '?'} 🎯${token.proTraders || '?'}${auditStr}`);
-
-    // Run filter engine
-    const hasActiveFilters = state.filters.maxAge > 0 || state.filters.minVolume > 0 || state.filters.minMC > 0 || state.filters.minTX > 0;
-    const result = hasActiveFilters ? MemeUtils.matchesFilters(token, state.filters) : { passed: true, reasons: [] };
-
-    if (result.passed) {
-      matchCount++;
-      if (!isUpdate) state.stats.totalMatched++;
-
-      if (state.filters.autoOpen && !state.watchedTokens.has(key) && state.watchedTokens.size < state.filters.maxTabs) {
-        openTokenTab(token);
-      } else if (state.filters.autoOpen && state.watchedTokens.size >= state.filters.maxTabs && !state.watchedTokens.has(key)) {
-        log(`⚠️ Tab limit (${state.filters.maxTabs}). ${token.ticker} queued.`);
-        state.watchedTokens.set(key, { token, tabId: null, status: 'queued', detailData: null });
-      }
-    } else {
-      if (!isUpdate) {
-        state.stats.totalRejected++;
-        state.rejectedTokens.set(key, { token, reasons: result.reasons });
-        log(`❌ REJECTED: ${token.ticker || '???'} — ${result.reasons.join(', ')}`);
-      }
-    }
-  });
-
-  if (newCount > 0 || updateCount > 0) {
-    log(`📥 ${newCount} new, ${updateCount} updated, ${matchCount} matched`);
-    saveStats();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== SCAN_ALARM) {
+    return;
   }
+  kickTrackedTabs();
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  removeTrackedTabById(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab?.url) {
+    return;
+  }
+  const host = toNormalizedHost(tab.url);
+  if (!isSupportedHost(host)) {
+    return;
+  }
+  registerTrackedTab(host, tabId)
+    .then(() => forceScanOnTab(tabId))
+    .catch(() => {});
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  (async () => {
+    try {
+      switch (message?.type) {
+        case 'GET_STATE': {
+          const state = await getState();
+          sendResponse({ ok: true, ...state });
+          return;
+        }
+        case 'TOGGLE_SCANNER': {
+          const out = await toggleScanner();
+          sendResponse({ ok: true, enabled: out.enabled });
+          return;
+        }
+        case 'UPSERT_SETTINGS': {
+          await upsertSettings(message.payload || {});
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'MARKET_BATCH': {
+          await processMarketBatch(message.payload || {}, sender);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'CONTENT_STATUS': {
+          await processContentStatus(message.payload || {}, sender);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'TOGGLE_WATCH': {
+          await toggleWatch(message.token);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'SIM_BUY': {
+          await buySimulation(message.token, message.amountUsd);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'SIM_SELL': {
+          await sellSimulation(message.tokenId);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'CLEAR_LIST': {
+          await clearList(message.target);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'OPEN_PLATFORM': {
+          const out = await openOrReusePlatformTab(message.url || '');
+          sendResponse({ ok: true, ...out });
+          return;
+        }
+        default:
+          sendResponse({ ok: false, error: 'Unknown message type.' });
+      }
+    } catch (error) {
+      sendResponse({ ok: false, error: error?.message || String(error) });
+    }
+  })();
+  return true;
+});
+
+async function getState() {
+  const data = await chrome.storage.local.get(Object.values(KEYS));
+  const storedSettings = data[KEYS.settings] || {};
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...storedSettings,
+    filters: {
+      ...DEFAULT_SETTINGS.filters,
+      ...(storedSettings.filters || {}),
+      protocols: {
+        ...DEFAULT_SETTINGS.filters.protocols,
+        ...(storedSettings.filters?.protocols || {})
+      }
+    }
+  };
+  const hud = await computeUptime(data[KEYS.hud] || DEFAULT_HUD, settings.enabled);
+  const watchlist = data[KEYS.watchlist] || {};
+  const positions = data[KEYS.positions] || {};
+  const marketFeed = data[KEYS.marketFeed] || {};
+  const logs = data[KEYS.logs] || [];
+
+  return {
+    settings,
+    hud,
+    watchlist,
+    positions,
+    marketFeed,
+    logs
+  };
 }
 
-async function openTokenTab(token) {
-  const key = token.contractAddress || token.ticker || MemeUtils.tokenKey(token);
-  const url = token.tokenPath
-    ? (token.tokenPath.startsWith('http') ? token.tokenPath : `https://axiom.trade${token.tokenPath}`)
-    : (token.contractAddress ? `https://axiom.trade/t/${token.contractAddress}/sol` : null);
+async function toggleScanner() {
+  const { settings, hud } = await getState();
+  const nextSettings = {
+    ...settings,
+    enabled: !settings.enabled
+  };
+  const nextHud = {
+    ...hud,
+    lastActiveAt: Date.now()
+  };
+  await chrome.storage.local.set({ [KEYS.settings]: nextSettings, [KEYS.hud]: nextHud });
+  ensureScanAlarm(!!nextSettings.enabled);
+  await appendLog(nextSettings.enabled ? 'Scanner enabled.' : 'Scanner paused.');
+  return nextSettings;
+}
 
-  if (!url) {
-    log(`⚠️ No URL for ${token.ticker}, skipping tab open`);
+async function upsertSettings(patch) {
+  const { settings } = await getState();
+  const merged = {
+    ...settings,
+    ...patch,
+    filters: {
+      ...(settings.filters || {}),
+      ...(patch.filters || {})
+    }
+  };
+  await chrome.storage.local.set({ [KEYS.settings]: merged });
+  if (Object.prototype.hasOwnProperty.call(patch, 'liveItemsTarget')) {
+    await applyLiveItemsZoomToAllPlatformTabs(Number(merged.liveItemsTarget || 10));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'refreshMs') || Object.prototype.hasOwnProperty.call(patch, 'enabled')) {
+    ensureScanAlarm(!!merged.enabled);
+  }
+  await appendLog('Settings updated.');
+}
+
+async function processMarketBatch(payload, sender) {
+  const tokens = Array.isArray(payload.tokens) ? payload.tokens : [];
+  const removedTokenIds = Array.isArray(payload.removedTokenIds) ? payload.removedTokenIds : [];
+  if (!tokens.length && !removedTokenIds.length) {
     return;
   }
 
-  try {
-    const tab = await chrome.tabs.create({ url, active: false });
-    state.watchedTokens.set(key, {
-      token,
-      tabId: tab.id,
-      status: 'monitoring',
-      detailData: null,
-      openedAt: Date.now()
-    });
-    log(`🔵 Opened tab for ${token.ticker || token.name}: ${url}`);
-  } catch (err) {
-    log(`❌ Failed to open tab for ${token.ticker}: ${err.message}`);
+  const state = await getState();
+  if (!state.settings.enabled) {
+    return;
   }
-}
 
-function handleSecondaryData(tokenPath, data) {
-  // Find the watched token by path
-  for (const [key, entry] of state.watchedTokens) {
-    if (entry.token.tokenPath === tokenPath) {
-      entry.detailData = data;
-      entry.lastUpdate = Date.now();
+  const hostFromSender = toNormalizedHost(sender?.url || '');
+  if (hostFromSender && sender?.tab?.id) {
+    await registerTrackedTab(hostFromSender, sender.tab.id);
+  }
 
-      // Check for rug indicators
-      if (data.isRugRisk && data.rugIndicators.length > 0) {
-        log(`🚨 RUG RISK for ${entry.token.ticker}: ${data.rugIndicators.join(', ')}`);
-        // Notify via Chrome notification
-        chrome.notifications.create({
-          type: 'basic',
-          iconUrl: 'icons/icon128.png',
-          title: '🚨 MemeScanner — Rug Risk Detected',
-          message: `${entry.token.ticker}: ${data.rugIndicators.join(', ')}`,
-          priority: 2
-        }).catch(() => {});
-      }
-      return;
+  const feed = { ...state.marketFeed };
+  const watchlist = { ...state.watchlist };
+  const positions = { ...state.positions };
+  const scannedNow = new Set();
+  let matchedCount = 0;
+  let rejectedCount = 0;
+
+  for (const removedId of removedTokenIds) {
+    if (!removedId) {
+      continue;
+    }
+    delete feed[removedId];
+    if (watchlist[removedId]) {
+      delete watchlist[removedId];
     }
   }
-}
 
-function handleSecondaryTabReady(tokenPath, tabId) {
-  for (const [key, entry] of state.watchedTokens) {
-    if (entry.token.tokenPath === tokenPath) {
-      entry.tabId = tabId;
-      entry.status = 'monitoring';
-      log(`🔵 Secondary observer active for ${entry.token.ticker} (tab ${tabId})`);
-      return;
+  for (const token of tokens) {
+    const tokenId = getTokenId(token);
+    if (!tokenId) {
+      continue;
+    }
+
+    scannedNow.add(tokenId);
+    const tokenRecord = {
+      ...token,
+      tokenId,
+      updatedAt: Date.now(),
+      pageOrder: Number.isFinite(Number(token.pageOrder)) ? Number(token.pageOrder) : Number.MAX_SAFE_INTEGER,
+      sourceHost: sender?.url ? new URL(sender.url).host : ''
+    };
+
+    tokenRecord.matchesFilters = true;
+    tokenRecord.filterReasons = [];
+
+    const includeInFeed = true;
+
+    matchedCount += 1;
+
+    if (includeInFeed) {
+      feed[tokenId] = tokenRecord;
+    }
+
+    if (watchlist[tokenId]) {
+      watchlist[tokenId] = {
+        ...watchlist[tokenId],
+        ...tokenRecord,
+        updatedAt: Date.now()
+      };
+    }
+
+    if (positions[tokenId]) {
+      positions[tokenId] = recalcPosition(positions[tokenId], tokenRecord);
     }
   }
-}
 
-function closeWatchedToken(tokenPath) {
-  for (const [key, entry] of state.watchedTokens) {
-    if (entry.token.tokenPath === tokenPath || key === tokenPath) {
-      if (entry.tabId) {
-        chrome.tabs.remove(entry.tabId).catch(() => {});
-      }
-      state.watchedTokens.delete(key);
-      log(`🔴 Stopped monitoring ${entry.token.ticker || key}`);
-
-      // Check if there are queued tokens to open
-      checkQueue();
-      return;
-    }
-  }
-}
-
-function checkQueue() {
-  for (const [key, entry] of state.watchedTokens) {
-    if (entry.status === 'queued' && state.watchedTokens.size < state.filters.maxTabs) {
-      openTokenTab(entry.token);
-      break;
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  TAB LIFECYCLE
-// ═══════════════════════════════════════════════════════════════════
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  for (const [key, entry] of state.watchedTokens) {
-    if (entry.tabId === tabId) {
-      state.watchedTokens.delete(key);
-      log(`🔴 Tab closed for ${entry.token.ticker || key}`);
-      checkQueue();
-      return;
-    }
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════
-//  STATE ACCESSORS
-// ═══════════════════════════════════════════════════════════════════
-
-function getPublicState() {
-  return {
-    enabled: state.filters.enabled,
-    filters: { ...state.filters },
-    stats: {
-      ...state.stats,
-      currentlyWatching: state.watchedTokens.size,
-      totalSeen: state.seenTokens.size,
-      uptimeMs: Date.now() - state.stats.startedAt
+  const trimmedFeed = trimFeed(feed, MAX_FEED_ITEMS);
+  const nextHud = await computeUptime(
+    {
+      ...state.hud,
+      totalScanned: (state.hud.totalScanned || 0) + scannedNow.size,
+      totalMatched: (state.hud.totalMatched || 0) + matchedCount,
+      totalRejected: (state.hud.totalRejected || 0) + rejectedCount,
+      feedCount: Object.keys(trimmedFeed).length,
+      watchCount: Object.keys(watchlist).length,
+      openPositions: Object.keys(positions).length,
+      lastActiveAt: Date.now()
     },
-    watchedTokens: Array.from(state.watchedTokens.entries()).map(([key, entry]) => ({
-      key,
-      ticker: entry.token.ticker,
-      name: entry.token.name,
-      tokenPath: entry.token.tokenPath,
-      contractAddress: entry.token.contractAddress,
-      age: entry.token.age,
-      volume: entry.token.volume,
-      marketCap: entry.token.marketCap,
-      mcChange: entry.token.mcChange,
-      liquidity: entry.token.liquidity,
-      txTotal: entry.token.txTotal,
-      txBuys: entry.token.txBuys,
-      txSells: entry.token.txSells,
-      topHolders: entry.token.topHolders,
-      topHoldersRisk: entry.token.topHoldersRisk,
-      insiderPct: entry.token.insiderPct,
-      botPct: entry.token.botPct,
-      bundlePct: entry.token.bundlePct,
-      dexPaid: entry.token.dexPaid,
-      holders: entry.token.holders,
-      proTraders: entry.token.proTraders,
-      status: entry.status,
-      detailData: entry.detailData,
-      openedAt: entry.openedAt
-    })),
-    recentMatches: Array.from(state.seenTokens.values())
-      .filter(t => {
-        const result = MemeUtils.matchesFilters(t, state.filters);
-        return result.passed;
-      })
-      .slice(-20)
-      .reverse()
-  };
+    true
+  );
+
+  await chrome.storage.local.set({
+    [KEYS.marketFeed]: trimmedFeed,
+    [KEYS.watchlist]: watchlist,
+    [KEYS.positions]: positions,
+    [KEYS.hud]: nextHud
+  });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  PERSISTENCE
-// ═══════════════════════════════════════════════════════════════════
-
-function updateFilters(newFilters) {
-  Object.assign(state.filters, newFilters);
-  saveFilters();
-  log('⚙️ Filters updated');
-}
-
-function saveFilters() {
-  chrome.storage.local.set({ filters: state.filters }).catch(() => {});
-}
-
-function saveStats() {
-  chrome.storage.local.set({
-    stats: {
-      totalScanned: state.stats.totalScanned,
-      totalMatched: state.stats.totalMatched,
-      totalRejected: state.stats.totalRejected
-    }
-  }).catch(() => {});
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  LOGGING
-// ═══════════════════════════════════════════════════════════════════
-
-function log(message) {
-  const entry = {
-    time: MemeUtils.formatTimestamp(),
-    message
-  };
-  state.logs.push(entry);
-  if (state.logs.length > MAX_LOGS) {
-    state.logs = state.logs.slice(-MAX_LOGS);
+async function processContentStatus(payload, sender) {
+  const host = sender?.url ? new URL(sender.url).host : 'unknown-host';
+  const message = String(payload?.message || '').trim();
+  if (!message) {
+    return;
   }
-  console.log(`[MemeScanner] ${entry.time} ${message}`);
+  await appendLog(`[content:${host}] ${message}`);
+}
+
+function recalcPosition(position, token) {
+  const currentMarketCap = MemeUtils.parseValue(token.marketCap || '0');
+  if (!currentMarketCap || !position.entryMarketCap) {
+    return position;
+  }
+  const multiplier = currentMarketCap / position.entryMarketCap;
+  const currentUsd = position.entryUsd * multiplier;
+  const pnlUsd = currentUsd - position.entryUsd;
+  const pnlPct = position.entryUsd > 0 ? (pnlUsd / position.entryUsd) * 100 : 0;
+  return {
+    ...position,
+    currentMarketCap,
+    currentUsd,
+    pnlUsd,
+    pnlPct,
+    updatedAt: Date.now()
+  };
+}
+
+async function toggleWatch(token) {
+  const tokenId = getTokenId(token || {});
+  if (!tokenId) {
+    return;
+  }
+  const { watchlist, hud } = await getState();
+  const nextWatch = { ...watchlist };
+  if (nextWatch[tokenId]) {
+    delete nextWatch[tokenId];
+    await appendLog(`Watch removed: ${token?.ticker || tokenId}`);
+  } else {
+    nextWatch[tokenId] = {
+      ...(token || {}),
+      tokenId,
+      addedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    await appendLog(`Watch added: ${token?.ticker || tokenId}`);
+  }
+
+  await chrome.storage.local.set({
+    [KEYS.watchlist]: nextWatch,
+    [KEYS.hud]: {
+      ...hud,
+      watchCount: Object.keys(nextWatch).length,
+      lastActiveAt: Date.now()
+    }
+  });
+}
+
+async function buySimulation(token, amountUsd) {
+  const tokenId = getTokenId(token || {});
+  if (!tokenId) {
+    return;
+  }
+
+  const { positions, settings, hud } = await getState();
+  const nextPositions = { ...positions };
+  const entryUsd = Number(amountUsd) > 0 ? Number(amountUsd) : Number(settings.defaultPositionUsd || 100);
+  const entryMarketCap = MemeUtils.parseValue(token.marketCap || '0');
+  if (!entryMarketCap) {
+    return;
+  }
+
+  nextPositions[tokenId] = {
+    tokenId,
+    ticker: token.ticker || 'UNKNOWN',
+    name: token.name || '',
+    entryUsd,
+    entryMarketCap,
+    currentMarketCap: entryMarketCap,
+    currentUsd: entryUsd,
+    pnlUsd: 0,
+    pnlPct: 0,
+    boughtAt: Date.now(),
+    updatedAt: Date.now()
+  };
+
+  await chrome.storage.local.set({
+    [KEYS.positions]: nextPositions,
+    [KEYS.hud]: {
+      ...hud,
+      openPositions: Object.keys(nextPositions).length,
+      lastActiveAt: Date.now()
+    }
+  });
+
+  await appendLog(`Sim buy: ${nextPositions[tokenId].ticker} @ $${entryUsd.toFixed(2)}`);
+}
+
+async function sellSimulation(tokenId) {
+  if (!tokenId) {
+    return;
+  }
+  const { positions, hud } = await getState();
+  if (!positions[tokenId]) {
+    return;
+  }
+
+  const sold = positions[tokenId];
+  const nextPositions = { ...positions };
+  delete nextPositions[tokenId];
+
+  await chrome.storage.local.set({
+    [KEYS.positions]: nextPositions,
+    [KEYS.hud]: {
+      ...hud,
+      openPositions: Object.keys(nextPositions).length,
+      lastActiveAt: Date.now()
+    }
+  });
+  await appendLog(`Sim sell: ${sold.ticker}`);
+}
+
+async function clearList(target) {
+  const { hud } = await getState();
+  if (target === 'feed') {
+    const now = Date.now();
+    await chrome.storage.local.set({
+      [KEYS.marketFeed]: {},
+      [KEYS.watchlist]: {},
+      [KEYS.positions]: {},
+      [KEYS.hud]: {
+        ...hud,
+        totalScanned: 0,
+        totalMatched: 0,
+        totalRejected: 0,
+        feedCount: 0,
+        watchCount: 0,
+        openPositions: 0,
+        startedAt: now,
+        lastActiveAt: now,
+        uptimeSeconds: 0
+      }
+    });
+    await appendLog('Dashboard reset from Feed clear.');
+    return;
+  }
+  if (target === 'watchlist') {
+    await chrome.storage.local.set({ [KEYS.watchlist]: {}, [KEYS.hud]: { ...hud, watchCount: 0 } });
+    return;
+  }
+  if (target === 'positions') {
+    await chrome.storage.local.set({
+      [KEYS.positions]: {},
+      [KEYS.hud]: { ...hud, openPositions: 0 }
+    });
+    return;
+  }
+  if (target === 'logs') {
+    await chrome.storage.local.set({ [KEYS.logs]: [] });
+  }
+}
+
+async function computeUptime(hud, enabled) {
+  const now = Date.now();
+  const previous = Number(hud.lastActiveAt || now);
+  const deltaSeconds = Math.max(0, Math.floor((now - previous) / 1000));
+  return {
+    ...hud,
+    lastActiveAt: now,
+    uptimeSeconds: enabled ? (hud.uptimeSeconds || 0) + deltaSeconds : hud.uptimeSeconds || 0
+  };
+}
+
+function getTokenId(token) {
+  return token?.contractAddress || token?.tokenId || token?.tokenPath || token?.ticker || '';
+}
+
+function trimFeed(feedMap, maxSize) {
+  const entries = Object.entries(feedMap);
+  entries.sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0));
+  return Object.fromEntries(entries.slice(0, maxSize));
+}
+
+async function appendLog(message) {
+  const data = await chrome.storage.local.get(KEYS.logs);
+  const logs = Array.isArray(data[KEYS.logs]) ? data[KEYS.logs] : [];
+  const next = [
+    {
+      at: Date.now(),
+      message
+    },
+    ...logs
+  ].slice(0, MAX_LOGS);
+  await chrome.storage.local.set({ [KEYS.logs]: next });
+}
+
+async function openOrReusePlatformTab(targetUrl) {
+  if (!targetUrl) {
+    throw new Error('Missing platform url.');
+  }
+
+  const { settings } = await getState();
+  const host = new URL(targetUrl).hostname;
+
+  if (openPlatformLocks.has(host)) {
+    return openPlatformLocks.get(host);
+  }
+
+  const run = (async () => {
+  const pattern = getPlatformPattern(host);
+  const existing = await chrome.tabs.query({ url: pattern });
+
+  let tab;
+  if (existing.length) {
+    tab = existing[0];
+    await chrome.tabs.update(tab.id, {
+      url: targetUrl,
+      pinned: !!settings.launchPinned,
+      autoDiscardable: false,
+      active: settings.launchInBackground ? false : true
+    });
+    if (!settings.launchInBackground && tab.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+    await appendLog(`Reused tracked tab for ${host}.`);
+  } else {
+    tab = await chrome.tabs.create({
+      url: targetUrl,
+      pinned: !!settings.launchPinned,
+      autoDiscardable: false,
+      active: settings.launchInBackground ? false : true
+    });
+    await appendLog(`Opened tracked tab for ${host}.`);
+  }
+
+  await chrome.tabs.update(tab.id, { autoDiscardable: false });
+  await registerTrackedTab(host, tab.id);
+
+  await applyLiveItemsZoomToTab(tab.id, Number(settings.liveItemsTarget || 10));
+  setTimeout(() => {
+    forceScanOnTab(tab.id);
+  }, 700);
+
+  return { tabId: tab.id, reused: !!existing.length };
+  })();
+
+  openPlatformLocks.set(host, run);
+  try {
+    return await run;
+  } finally {
+    openPlatformLocks.delete(host);
+  }
+}
+
+function getPlatformPattern(hostname) {
+  const host = String(hostname || '').replace(/^www\./, '');
+  return [`*://${host}/*`, `*://www.${host}/*`];
+}
+
+function getZoomFactor(liveItemsTarget) {
+  const map = {
+    10: 1,
+    14: 0.9,
+    18: 0.8,
+    22: 0.75,
+    26: 0.67,
+    30: 0.5,
+    33: 0.33
+  };
+  const target = Number(liveItemsTarget || 10);
+  if (map[target]) {
+    return map[target];
+  }
+  if (target <= 10) {
+    return 1;
+  }
+  return Math.max(0.33, 1 - (target - 10) * 0.025);
+}
+
+async function applyLiveItemsZoomToAllPlatformTabs(liveItemsTarget) {
+  const urls = ['*://axiom.trade/*', '*://www.axiom.trade/*', '*://gmgn.ai/*', '*://www.gmgn.ai/*', '*://pump.fun/*', '*://www.pump.fun/*'];
+  const tabs = await chrome.tabs.query({ url: urls });
+  await Promise.all(tabs.map((tab) => applyLiveItemsZoomToTab(tab.id, liveItemsTarget)));
+}
+
+async function applyLiveItemsZoomToTab(tabId, liveItemsTarget) {
+  if (!tabId) {
+    return;
+  }
+  const zoomFactor = getZoomFactor(liveItemsTarget);
+  try {
+    await chrome.tabs.setZoom(tabId, zoomFactor);
+  } catch (error) {
+    await appendLog(`Zoom apply failed on tab ${tabId}: ${error?.message || String(error)}`);
+  }
+}
+
+function forceScanOnTab(tabId) {
+  if (!tabId) {
+    return;
+  }
+  chrome.tabs.sendMessage(tabId, { type: 'FORCE_SCAN' }, () => {
+    if (chrome.runtime.lastError) {
+      return;
+    }
+  });
+}
+
+function ensureScanAlarm(enabled) {
+  if (!enabled) {
+    chrome.alarms.clear(SCAN_ALARM, () => {});
+    return;
+  }
+
+  chrome.alarms.create(SCAN_ALARM, {
+    delayInMinutes: 0.5,
+    periodInMinutes: 0.5
+  });
+}
+
+function toNormalizedHost(urlOrHost) {
+  if (!urlOrHost) {
+    return '';
+  }
+  try {
+    const host = urlOrHost.includes('://') ? new URL(urlOrHost).hostname : String(urlOrHost);
+    return host.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isSupportedHost(host) {
+  return ['axiom.trade', 'gmgn.ai', 'pump.fun'].some((base) => host === base || host.endsWith(`.${base}`));
+}
+
+async function registerTrackedTab(hostname, tabId) {
+  if (!hostname || !tabId) {
+    return;
+  }
+  const host = toNormalizedHost(hostname);
+  if (!isSupportedHost(host)) {
+    return;
+  }
+  const data = await chrome.storage.local.get(KEYS.trackedTabs);
+  const trackedTabs = { ...(data[KEYS.trackedTabs] || {}) };
+  trackedTabs[host] = tabId;
+  await chrome.storage.local.set({ [KEYS.trackedTabs]: trackedTabs });
+}
+
+async function removeTrackedTabById(tabId) {
+  if (!tabId) {
+    return;
+  }
+  const data = await chrome.storage.local.get(KEYS.trackedTabs);
+  const trackedTabs = { ...(data[KEYS.trackedTabs] || {}) };
+  let changed = false;
+  for (const [host, id] of Object.entries(trackedTabs)) {
+    if (id === tabId) {
+      delete trackedTabs[host];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ [KEYS.trackedTabs]: trackedTabs });
+  }
+}
+
+async function adoptExistingPlatformTabs() {
+  const urls = ['*://axiom.trade/*', '*://www.axiom.trade/*', '*://gmgn.ai/*', '*://www.gmgn.ai/*', '*://pump.fun/*', '*://www.pump.fun/*'];
+  const tabs = await chrome.tabs.query({ url: urls });
+  for (const tab of tabs) {
+    if (!tab?.id || !tab?.url) {
+      continue;
+    }
+    const host = toNormalizedHost(tab.url);
+    await registerTrackedTab(host, tab.id);
+    try {
+      await chrome.tabs.update(tab.id, { autoDiscardable: false });
+    } catch {
+      // ignore update failures
+    }
+  }
+}
+
+async function kickTrackedTabs() {
+  const { settings } = await getState();
+  if (!settings.enabled) {
+    return;
+  }
+
+  const data = await chrome.storage.local.get(KEYS.trackedTabs);
+  const trackedTabs = { ...(data[KEYS.trackedTabs] || {}) };
+
+  for (const [host, tabId] of Object.entries(trackedTabs)) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab?.id) {
+        delete trackedTabs[host];
+        continue;
+      }
+
+      if (tab.discarded) {
+        await chrome.tabs.reload(tab.id);
+      }
+
+      await chrome.tabs.update(tab.id, { autoDiscardable: false });
+      await applyLiveItemsZoomToTab(tab.id, Number(settings.liveItemsTarget || 10));
+      forceScanOnTab(tab.id);
+    } catch {
+      delete trackedTabs[host];
+    }
+  }
+
+  await chrome.storage.local.set({ [KEYS.trackedTabs]: trackedTabs });
 }

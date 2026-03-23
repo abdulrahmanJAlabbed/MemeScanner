@@ -1,27 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "MemeScanner",
-  "version": "1.1.0",
-  "description": "Real-time axiom.trade token monitor — detects new coins, filters by quality, and monitors matches.",
-  "permissions": [
-    "tabs",
-    "storage",
-    "notifications"
-  ],
+  "name": "MemeScanner Pro",
+  "version": "4.0.0",
+  "description": "Premium Solana token scanner and portfolio simulation dashboard with zero-flicker DOM ingestion.",
+  "permissions": ["storage", "tabs", "activeTab", "alarms"],
   "host_permissions": [
-    "https://axiom.trade/*"
-  ],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://axiom.trade/*"],
-      "js": ["utils.js", "content-router.js"],
-      "run_at": "document_idle"
-    }
+    "https://*.axiom.trade/*",
+    "https://*.gmgn.ai/*",
+    "https://*.pump.fun/*",
+    "https://*.photon-sol.tinyastro.io/*",
+    "https://*.dexscreener.com/*",
+    "https://*.bullx.io/*"
   ],
   "action": {
+    "default_title": "MemeScanner Pro",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -29,6 +21,37 @@
       "128": "icons/icon128.png"
     }
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.axiom.trade/*",
+        "https://*.gmgn.ai/*",
+        "https://*.pump.fun/*",
+        "https://*.photon-sol.tinyastro.io/*",
+        "https://*.dexscreener.com/*",
+        "https://*.bullx.io/*"
+      ],
+      "js": ["utils.js", "content-script.js", "content-router.js"],
+      "css": ["content-style.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["scraper-config.json"],
+      "matches": [
+        "https://*.axiom.trade/*",
+        "https://*.gmgn.ai/*",
+        "https://*.pump.fun/*",
+        "https://*.photon-sol.tinyastro.io/*",
+        "https://*.dexscreener.com/*",
+        "https://*.bullx.io/*"
+      ]
+    }
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
