@@ -362,6 +362,14 @@ body {
   font-size: 13px;
 }
 
+.settings-subtitle {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--txt-soft);
+  margin-top: 4px;
+}
+
 .field {
   display: flex;
   flex-direction: column;

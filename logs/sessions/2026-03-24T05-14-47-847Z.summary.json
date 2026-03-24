@@ -1,0 +1,28 @@
+{
+  "sessionId": "2026-03-24T05-14-47-847Z",
+  "reason": "sigterm",
+  "startedAt": "2026-03-24T05:14:47.847Z",
+  "endedAt": "2026-03-24T05:14:52.734Z",
+  "uptimeSec": 4,
+  "realizedPnlUsd": 0,
+  "deployedUsd": 0,
+  "roiPct": 0,
+  "closedTrades": 0,
+  "winningTrades": 0,
+  "losingTrades": 0,
+  "breakEvenTrades": 0,
+  "winRatePct": 0,
+  "peakActiveTargets": 0,
+  "peakOpenPositions": 0,
+  "totalEvents": 1,
+  "stderrLines": 0,
+  "lastError": "",
+  "eventTypeCounts": {
+    "ready": 1
+  },
+  "skipReasons": {},
+  "files": {
+    "eventsJsonl": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-14-47-847Z.events.jsonl",
+    "summaryJson": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-14-47-847Z.summary.json"
+  }
+}

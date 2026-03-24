@@ -1,0 +1,45 @@
+{
+  "sessionId": "2026-03-24T05-21-43-561Z",
+  "reason": "sigint",
+  "startedAt": "2026-03-24T05:21:43.561Z",
+  "endedAt": "2026-03-24T05:22:44.539Z",
+  "uptimeSec": 60,
+  "realizedPnlUsd": 0.29,
+  "deployedUsd": 400,
+  "roiPct": 0.0725,
+  "bankrollRoiPct": 0.145,
+  "closedTrades": 3,
+  "winningTrades": 1,
+  "losingTrades": 2,
+  "breakEvenTrades": 0,
+  "winRatePct": 33.33,
+  "peakActiveTargets": 5,
+  "peakOpenPositions": 1,
+  "totalEvents": 143,
+  "stderrLines": 0,
+  "lastError": "AMM vault account 5yLAcMtnb1RQQJzuXWbGBc4zGpC6y6AFngoSVG7bAogz not found for AHjt5D35i6oaZG8EqowX3xeczzTahrsNdzcvfHZvpump",
+  "eventTypeCounts": {
+    "amm_tick": 49,
+    "ipc_error": 8,
+    "metadata": 66,
+    "paper_entry": 4,
+    "paper_trade_result": 3,
+    "ready": 1,
+    "target_cleanup": 3,
+    "target_ready": 8,
+    "trade_skipped": 1
+  },
+  "skipReasons": {
+    "insufficient_capital": 1
+  },
+  "capital": {
+    "initialUsd": 200,
+    "availableUsd": 100.29,
+    "lockedUsd": 100,
+    "equityUsd": 200.29
+  },
+  "files": {
+    "eventsJsonl": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-21-43-561Z.events.jsonl",
+    "summaryJson": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-21-43-561Z.summary.json"
+  }
+}

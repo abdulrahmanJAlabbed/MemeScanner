@@ -26,9 +26,19 @@
       showAdvancedData: $('showAdvancedData'),
       launchPinned: $('launchPinned'),
       launchInBackground: $('launchInBackground'),
+      executionMode: $('executionMode'),
+      snipeMaxAgeSeconds: $('snipeMaxAgeSeconds'),
+      snipeMinVelocity: $('snipeMinVelocity'),
+      snipeMaxTop10Pct: $('snipeMaxTop10Pct'),
+      snipeAmountUsd: $('snipeAmountUsd'),
       saveButton: $('saveSettings')
     }
   };
+
+  function toNumberOr(value, fallback) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  }
 
   function formatClock(seconds) {
     const total = Math.max(0, Number(seconds || 0));
@@ -200,6 +210,11 @@
     UI.settings.showAdvancedData.checked = settings.showAdvancedData !== false;
     UI.settings.launchPinned.checked = !!settings.launchPinned;
     UI.settings.launchInBackground.checked = !!settings.launchInBackground;
+    UI.settings.executionMode.value = settings.executionMode || 'paper';
+    UI.settings.snipeMaxAgeSeconds.value = String(toNumberOr(settings.snipeFilters?.maxAgeSeconds, 120));
+    UI.settings.snipeMinVelocity.value = String(toNumberOr(settings.snipeFilters?.minVelocity, 0.03));
+    UI.settings.snipeMaxTop10Pct.value = String(toNumberOr(settings.snipeFilters?.maxTop10Pct, 15));
+    UI.settings.snipeAmountUsd.value = String(toNumberOr(settings.snipeFilters?.amountUsd, 100));
     UI.settings.saveButton.dataset.bound = '1';
   }
 
@@ -405,7 +420,14 @@
           liveItemsTarget: Number(UI.settings.liveItemsTarget.value || 10),
           showAdvancedData: !!UI.settings.showAdvancedData.checked,
           launchPinned: !!UI.settings.launchPinned.checked,
-          launchInBackground: !!UI.settings.launchInBackground.checked
+          launchInBackground: !!UI.settings.launchInBackground.checked,
+          executionMode: UI.settings.executionMode.value === 'live' ? 'live' : 'paper',
+          snipeFilters: {
+            maxAgeSeconds: toNumberOr(UI.settings.snipeMaxAgeSeconds.value, 120),
+            minVelocity: toNumberOr(UI.settings.snipeMinVelocity.value, 0.03),
+            maxTop10Pct: toNumberOr(UI.settings.snipeMaxTop10Pct.value, 15),
+            amountUsd: toNumberOr(UI.settings.snipeAmountUsd.value, 100)
+          }
         }
       });
       await syncState();

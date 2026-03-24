@@ -1,0 +1,38 @@
+{
+  "sessionId": "2026-03-24T05-15-45-958Z",
+  "reason": "sigint",
+  "startedAt": "2026-03-24T05:15:45.958Z",
+  "endedAt": "2026-03-24T05:18:41.676Z",
+  "uptimeSec": 175,
+  "realizedPnlUsd": -1.93,
+  "deployedUsd": 2500,
+  "roiPct": -0.0772,
+  "closedTrades": 23,
+  "winningTrades": 11,
+  "losingTrades": 12,
+  "breakEvenTrades": 0,
+  "winRatePct": 47.83,
+  "peakActiveTargets": 8,
+  "peakOpenPositions": 2,
+  "totalEvents": 1185,
+  "stderrLines": 0,
+  "lastError": "failed to get token largest accounts: Invalid param: not a Token mint",
+  "eventTypeCounts": {
+    "amm_tick": 691,
+    "ipc_error": 3,
+    "metadata": 331,
+    "paper_entry": 25,
+    "paper_trade_result": 23,
+    "ready": 1,
+    "target_cleanup": 23,
+    "target_ready": 31,
+    "trade_skipped": 57
+  },
+  "skipReasons": {
+    "max_open_positions_reached": 57
+  },
+  "files": {
+    "eventsJsonl": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-15-45-958Z.events.jsonl",
+    "summaryJson": "/home/cella/Desktop/MemeScanner/logs/sessions/2026-03-24T05-15-45-958Z.summary.json"
+  }
+}

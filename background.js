@@ -16,7 +16,8 @@ const KEYS = {
   positions: 'positions',
   marketFeed: 'marketFeed',
   logs: 'logs',
-  trackedTabs: 'trackedTabs'
+  trackedTabs: 'trackedTabs',
+  trackedTargets: 'trackedTargets'
 };
 
 const MAX_LOGS = 200;
@@ -26,6 +27,7 @@ const PLATFORM_LOCK_STALE_MS = 3000;
 const SCAN_ALARM = 'memeScannerScanKick';
 const LOCAL_IPC_URL = 'ws://127.0.0.1:8080';
 const LOCAL_IPC_AUTH_TOKEN = 'local-dev-ipc-token';
+const TRACKED_TARGET_TTL_MS = 30 * 60 * 1000;
 
 let localIpcSocket = null;
 let localIpcReady = false;
@@ -54,8 +56,66 @@ const DEFAULT_SETTINGS = {
     marketCap: { min: 0, max: 0 },
     liquidity: { min: 0, max: 0 },
     volume: { min: 0, max: 0 }
+  },
+  executionMode: 'paper',
+  snipeFilters: {
+    maxAgeSeconds: 120,
+    minVelocity: 0.03,
+    maxTop10Pct: 15,
+    amountUsd: 100
   }
 };
+
+function parseAgeToSeconds(text) {
+  const cleaned = String(text || '').trim().toLowerCase();
+  const match = cleaned.match(/^(\d+(?:\.\d+)?)\s*(s|m|h|d)$/);
+  if (!match) return Number.POSITIVE_INFINITY;
+  const value = Number(match[1]);
+  const unit = match[2];
+  if (!Number.isFinite(value)) return Number.POSITIVE_INFINITY;
+  if (unit === 's') return value;
+  if (unit === 'm') return value * 60;
+  if (unit === 'h') return value * 3600;
+  if (unit === 'd') return value * 86400;
+  return Number.POSITIVE_INFINITY;
+}
+
+function parsePercent(text) {
+  const match = String(text || '').match(/-?\d+(?:\.\d+)?/);
+  if (!match) return Number.NaN;
+  return Number(match[0]);
+}
+
+function estimateVelocity(token) {
+  const buys = Number(token?.txBuys || 0);
+  const sells = Number(token?.txSells || 0);
+  const total = Number(token?.txTotal || buys + sells || 0);
+  const ageSeconds = parseAgeToSeconds(token?.age || '');
+  if (!Number.isFinite(ageSeconds) || ageSeconds <= 0) return 0;
+  const directional = Number.isFinite(total) && total > 0 ? Math.max(0, (buys - sells) / total) : 0;
+  return directional * (total / ageSeconds);
+}
+
+function passesSnipeFilters(token, snipeFilters) {
+  const maxAgeSeconds = Number.isFinite(Number(snipeFilters?.maxAgeSeconds)) ? Number(snipeFilters.maxAgeSeconds) : 120;
+  const minVelocity = Number.isFinite(Number(snipeFilters?.minVelocity)) ? Number(snipeFilters.minVelocity) : 0.03;
+  const maxTop10Pct = Number.isFinite(Number(snipeFilters?.maxTop10Pct)) ? Number(snipeFilters.maxTop10Pct) : 15;
+
+  const ageSeconds = parseAgeToSeconds(token?.age || '');
+  const top10Pct = parsePercent(token?.top10Pct || token?.topHolders || '');
+  const velocity = estimateVelocity(token);
+
+  const ageOk = Number.isFinite(ageSeconds) && ageSeconds <= maxAgeSeconds;
+  const top10Ok = Number.isFinite(top10Pct) && top10Pct <= maxTop10Pct;
+  const velocityOk = Number.isFinite(velocity) && velocity >= minVelocity;
+
+  return {
+    passed: ageOk && top10Ok && velocityOk,
+    ageSeconds,
+    top10Pct,
+    velocity
+  };
+}
 
 const DEFAULT_HUD = {
   totalScanned: 0,
@@ -87,6 +147,17 @@ function connectLocalIpc() {
       localIpcConnecting = false;
     });
 
+    ws.addEventListener('message', (event) => {
+      try {
+        const msg = JSON.parse(String(event?.data || '{}'));
+        if (msg?.type !== 'target_cleanup' || !msg?.mint) {
+          return;
+        }
+
+        releaseTrackedTarget(msg.mint).catch(() => {});
+      } catch {}
+    });
+
     ws.addEventListener('close', () => {
       localIpcReady = false;
       localIpcConnecting = false;
@@ -100,6 +171,21 @@ function connectLocalIpc() {
     localIpcReady = false;
     localIpcConnecting = false;
   }
+}
+
+async function releaseTrackedTarget(mint) {
+  if (!mint) {
+    return;
+  }
+
+  const stored = await chrome.storage.local.get([KEYS.trackedTargets]);
+  const trackedTargets = { ...(stored[KEYS.trackedTargets] || {}) };
+  if (!Object.prototype.hasOwnProperty.call(trackedTargets, mint)) {
+    return;
+  }
+
+  delete trackedTargets[mint];
+  await chrome.storage.local.set({ [KEYS.trackedTargets]: trackedTargets });
 }
 
 function sendIpcTokenMetadata(token, sender) {
@@ -120,7 +206,7 @@ function sendIpcTokenMetadata(token, sender) {
       top10Pct: token.topHolders || '',
       bundlersPct: token.bundlePct || '',
       devPct: token.insiderPct || '',
-      lpBurned: token.lpBurned ?? null,
+      lpBurned: token.lpBurned ?? true,
       updatedAt: Date.now()
     }
   };
@@ -128,6 +214,38 @@ function sendIpcTokenMetadata(token, sender) {
   try {
     localIpcSocket.send(JSON.stringify(payload));
   } catch {}
+}
+
+function sendIpcTargetAcquired({ mint, mode, amountUsd, token, snipe }) {
+  if (!mint || !localIpcSocket || !localIpcReady || localIpcSocket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+
+  const payload = {
+    type: 'target_acquired',
+    authToken: LOCAL_IPC_AUTH_TOKEN,
+    mode: mode === 'live' ? 'live' : 'paper',
+    mint,
+    amountUsd: Number(amountUsd) > 0 ? Number(amountUsd) : 100,
+    payload: {
+      mint,
+      ticker: token?.ticker || '',
+      platform: token?.platform || '',
+      marketCap: token?.marketCap || '',
+      top10Pct: token?.top10Pct || token?.topHolders || '',
+      bundlersPct: token?.bundlersPct || token?.bundlePct || '',
+      devPct: token?.devPct || token?.insiderPct || '',
+      lpBurned: token?.lpBurned ?? null,
+      snipe
+    }
+  };
+
+  try {
+    localIpcSocket.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function pushMetadataBatchToLocalIpc(tokens, sender) {
@@ -154,7 +272,8 @@ chrome.runtime.onInstalled.addListener(async () => {
     [KEYS.positions]: current[KEYS.positions] || {},
     [KEYS.marketFeed]: current[KEYS.marketFeed] || {},
     [KEYS.logs]: current[KEYS.logs] || [],
-    [KEYS.trackedTabs]: current[KEYS.trackedTabs] || {}
+    [KEYS.trackedTabs]: current[KEYS.trackedTabs] || {},
+    [KEYS.trackedTargets]: current[KEYS.trackedTargets] || {}
   });
   ensureScanAlarm(true);
   await adoptExistingPlatformTabs();
@@ -276,6 +395,7 @@ async function getState() {
   const positions = data[KEYS.positions] || {};
   const marketFeed = data[KEYS.marketFeed] || {};
   const logs = data[KEYS.logs] || [];
+  const trackedTargets = data[KEYS.trackedTargets] || {};
 
   return {
     settings,
@@ -283,7 +403,8 @@ async function getState() {
     watchlist,
     positions,
     marketFeed,
-    logs
+    logs,
+    trackedTargets
   };
 }
 
@@ -311,6 +432,10 @@ async function upsertSettings(patch) {
     filters: {
       ...(settings.filters || {}),
       ...(patch.filters || {})
+    },
+    snipeFilters: {
+      ...(settings.snipeFilters || {}),
+      ...(patch.snipeFilters || {})
     }
   };
   await chrome.storage.local.set({ [KEYS.settings]: merged });
@@ -335,6 +460,8 @@ async function processMarketBatch(payload, sender) {
     return;
   }
 
+  connectLocalIpc();
+
   const hostFromSender = toNormalizedHost(sender?.url || '');
   if (hostFromSender && sender?.tab?.id) {
     await registerTrackedTab(hostFromSender, sender.tab.id);
@@ -343,9 +470,17 @@ async function processMarketBatch(payload, sender) {
   const feed = { ...state.marketFeed };
   const watchlist = { ...state.watchlist };
   const positions = { ...state.positions };
+  const trackedTargets = { ...(state.trackedTargets || {}) };
   const scannedNow = new Set();
   let matchedCount = 0;
   let rejectedCount = 0;
+  const now = Date.now();
+
+  for (const [mint, ts] of Object.entries(trackedTargets)) {
+    if (!Number.isFinite(Number(ts)) || now - Number(ts) > TRACKED_TARGET_TTL_MS) {
+      delete trackedTargets[mint];
+    }
+  }
 
   for (const removedId of removedTokenIds) {
     if (!removedId) {
@@ -394,6 +529,25 @@ async function processMarketBatch(payload, sender) {
     if (positions[tokenId]) {
       positions[tokenId] = recalcPosition(positions[tokenId], tokenRecord);
     }
+
+    const mint = tokenRecord.contractAddress || tokenRecord.tokenId || '';
+    const snipe = passesSnipeFilters(tokenRecord, state.settings.snipeFilters || {});
+    if (mint && snipe.passed && !trackedTargets[mint]) {
+      const sent = sendIpcTargetAcquired({
+        mint,
+        mode: state.settings.executionMode || 'paper',
+        amountUsd: state.settings.snipeFilters?.amountUsd || 100,
+        token: tokenRecord,
+        snipe: {
+          ageSeconds: snipe.ageSeconds,
+          velocity: snipe.velocity,
+          top10Pct: snipe.top10Pct
+        }
+      });
+      if (sent) {
+        trackedTargets[mint] = now;
+      }
+    }
   }
 
   pushMetadataBatchToLocalIpc(tokens, sender);
@@ -417,7 +571,8 @@ async function processMarketBatch(payload, sender) {
     [KEYS.marketFeed]: trimmedFeed,
     [KEYS.watchlist]: watchlist,
     [KEYS.positions]: positions,
-    [KEYS.hud]: nextHud
+    [KEYS.hud]: nextHud,
+    [KEYS.trackedTargets]: trackedTargets
   });
 }
 

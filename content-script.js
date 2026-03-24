@@ -67,6 +67,20 @@
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
+  function parseAgeToSeconds(text) {
+    const cleaned = sanitizeText(text).toLowerCase();
+    const match = cleaned.match(/^(\d+(?:\.\d+)?)\s*(s|m|h|d)$/);
+    if (!match) return null;
+    const value = Number(match[1]);
+    if (!Number.isFinite(value)) return null;
+    const unit = match[2];
+    if (unit === 's') return value;
+    if (unit === 'm') return value * 60;
+    if (unit === 'h') return value * 3600;
+    if (unit === 'd') return value * 86400;
+    return null;
+  }
+
   function isLikelyMintAddress(value) {
     if (!value) return false;
     const cleaned = String(value).trim();
@@ -282,17 +296,27 @@
     const tokenId = contractAddress || `${presetName}:${ticker}`;
     const dataIndex = Number(row?.dataset?.index);
     const pageOrder = Number.isFinite(dataIndex) ? dataIndex : fallbackOrder;
+    const age = sanitizeText(ageNode?.textContent || '');
+    const ageSeconds = parseAgeToSeconds(age);
+    const txBuysN = Number(tx.txBuys || 0);
+    const txSellsN = Number(tx.txSells || 0);
+    const txTotalN = Number(tx.txTotal || txBuysN + txSellsN || 0);
+    const velocityScore = Number.isFinite(ageSeconds) && ageSeconds > 0
+      ? (Math.max(0, txBuysN - txSellsN) / Math.max(1, txTotalN)) * (txTotalN / ageSeconds)
+      : null;
 
     return {
       tokenId,
       contractAddress,
       ticker,
       name: sanitizeText(nameNode?.textContent || ''),
-      age: sanitizeText(ageNode?.textContent || ''),
+      age,
+      ageSeconds,
       marketCap,
       liquidity,
       volume,
       ...tx,
+      velocityScore,
       ...auditBadges,
       top10Pct: auditBadges.topHolders || '',
       bundlersPct: auditBadges.bundlePct || '',
