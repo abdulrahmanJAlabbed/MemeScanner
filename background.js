@@ -24,6 +24,12 @@ const MAX_FEED_ITEMS = 220;
 const openPlatformLocks = new Map();
 const PLATFORM_LOCK_STALE_MS = 3000;
 const SCAN_ALARM = 'memeScannerScanKick';
+const LOCAL_IPC_URL = 'ws://127.0.0.1:8080';
+const LOCAL_IPC_AUTH_TOKEN = 'local-dev-ipc-token';
+
+let localIpcSocket = null;
+let localIpcReady = false;
+let localIpcConnecting = false;
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -62,6 +68,82 @@ const DEFAULT_HUD = {
   lastActiveAt: Date.now(),
   uptimeSeconds: 0
 };
+
+function connectLocalIpc() {
+  if (localIpcSocket && (localIpcSocket.readyState === WebSocket.OPEN || localIpcSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  if (localIpcConnecting) {
+    return;
+  }
+
+  localIpcConnecting = true;
+  try {
+    const ws = new WebSocket(LOCAL_IPC_URL);
+    localIpcSocket = ws;
+
+    ws.addEventListener('open', () => {
+      localIpcReady = true;
+      localIpcConnecting = false;
+    });
+
+    ws.addEventListener('close', () => {
+      localIpcReady = false;
+      localIpcConnecting = false;
+    });
+
+    ws.addEventListener('error', () => {
+      localIpcReady = false;
+      localIpcConnecting = false;
+    });
+  } catch {
+    localIpcReady = false;
+    localIpcConnecting = false;
+  }
+}
+
+function sendIpcTokenMetadata(token, sender) {
+  if (!token || !localIpcSocket || !localIpcReady || localIpcSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  const payload = {
+    type: 'token_metadata',
+    authToken: LOCAL_IPC_AUTH_TOKEN,
+    payload: {
+      mint: token.contractAddress || token.tokenId || '',
+      tokenId: token.tokenId || '',
+      ticker: token.ticker || '',
+      platform: token.platform || '',
+      sourceHost: sender?.url ? new URL(sender.url).host : '',
+      marketCap: token.marketCap || '',
+      top10Pct: token.topHolders || '',
+      bundlersPct: token.bundlePct || '',
+      devPct: token.insiderPct || '',
+      lpBurned: token.lpBurned ?? null,
+      updatedAt: Date.now()
+    }
+  };
+
+  try {
+    localIpcSocket.send(JSON.stringify(payload));
+  } catch {}
+}
+
+function pushMetadataBatchToLocalIpc(tokens, sender) {
+  if (!Array.isArray(tokens) || !tokens.length) {
+    return;
+  }
+
+  connectLocalIpc();
+  if (!localIpcSocket || !localIpcReady || localIpcSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  for (const token of tokens) {
+    sendIpcTokenMetadata(token, sender);
+  }
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.local.get(Object.values(KEYS));
@@ -313,6 +395,8 @@ async function processMarketBatch(payload, sender) {
       positions[tokenId] = recalcPosition(positions[tokenId], tokenRecord);
     }
   }
+
+  pushMetadataBatchToLocalIpc(tokens, sender);
 
   const trimmedFeed = trimFeed(feed, MAX_FEED_ITEMS);
   const nextHud = await computeUptime(

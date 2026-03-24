@@ -67,33 +67,78 @@
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
+  function isLikelyMintAddress(value) {
+    if (!value) return false;
+    const cleaned = String(value).trim();
+
+    // Common meme mint form (ending in pump) and generic Solana-style addresses.
+    if (/^[A-Za-z0-9]{24,}pump$/i.test(cleaned)) return true;
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(cleaned)) return true;
+    return false;
+  }
+
+  function extractAddressFromText(value) {
+    const text = String(value || '');
+    const matches = text.match(/[A-Za-z0-9]{24,}pump|[1-9A-HJ-NP-Za-km-z]{32,44}/g) || [];
+    for (const candidate of matches) {
+      if (isLikelyMintAddress(candidate)) {
+        return candidate;
+      }
+    }
+    return '';
+  }
+
+  function collectTokenLinks(row) {
+    const links = [];
+    const seen = new Set();
+
+    row.querySelectorAll('a[href]').forEach((anchor) => {
+      const href = sanitizeText(anchor.getAttribute('href') || '');
+      if (!href || seen.has(href)) return;
+      seen.add(href);
+      links.push(href);
+    });
+
+    return links;
+  }
+
   function extractContractAddress(row) {
-    const contractLink = row.querySelector("a[href*='/coin/'],a[href*='/token/'],a[href*='/t/'],a[href*='pump.fun/coin/']");
-    if (!contractLink) {
-      const tokenImage = row.querySelector("img[src*='axiomtrading'],img[src*='axiom-assets']");
-      if (!tokenImage) {
-        return '';
+    const links = collectTokenLinks(row);
+
+    for (const href of links) {
+      const directMatch = href.match(/(?:\/coin\/|\/token\/|\/t\/)([A-Za-z0-9]{20,})/i);
+      if (directMatch?.[1] && isLikelyMintAddress(directMatch[1])) {
+        return directMatch[1];
       }
 
+      const pumpMatch = href.match(/pump\.fun\/coin\/([A-Za-z0-9]{20,})/i);
+      if (pumpMatch?.[1] && isLikelyMintAddress(pumpMatch[1])) {
+        return pumpMatch[1];
+      }
+
+      const fromText = extractAddressFromText(href);
+      if (fromText) {
+        return fromText;
+      }
+    }
+
+    // Fallback: many rows embed the mint in image URLs.
+    const tokenImage = row.querySelector("img[src*='axiomtrading'],img[src*='axiom-assets'],img[src*='cdn']");
+    if (tokenImage) {
       const src = tokenImage.getAttribute('src') || '';
-      const imageMatch = src.match(/\/([A-Za-z0-9]{30,})\.(?:webp|png|jpg|jpeg)/i);
-      return imageMatch?.[1] || '';
+      const fromSrc = extractAddressFromText(src);
+      if (fromSrc) {
+        return fromSrc;
+      }
     }
 
-    const href = contractLink.getAttribute('href') || '';
-    const directMatch = href.match(/(?:\/coin\/|\/token\/|\/t\/)([A-Za-z0-9]{20,})/i);
-    if (directMatch?.[1]) {
-      return directMatch[1];
+    // Last fallback: scan raw row text for a candidate address.
+    const rowTextMatch = extractAddressFromText(row.textContent || '');
+    if (rowTextMatch) {
+      return rowTextMatch;
     }
 
-    const pumpMatch = href.match(/pump\.fun\/coin\/([A-Za-z0-9]{20,})/i);
-    if (pumpMatch?.[1]) {
-      return pumpMatch[1];
-    }
-
-    const chunks = href.split('/').filter(Boolean);
-    const tail = chunks[chunks.length - 1] || '';
-    return /^[A-Za-z0-9]{20,}$/.test(tail) ? tail : '';
+    return '';
   }
 
   function detectPlatform(row) {
@@ -229,7 +274,10 @@
     const auditBadges = extractAuditBadges(auditCol);
     const platform = detectPlatform(row) || presetName;
 
+    const tokenLinks = collectTokenLinks(row);
     const contractAddress = extractContractAddress(row);
+    const detailsLink = tokenLinks.find((href) => /\/coin\/|\/token\/|\/t\//i.test(href)) || '';
+    const socialLink = tokenLinks.find((href) => /x\.com|twitter\.com/i.test(href)) || '';
     const audit = runAuditSuite(row, auditRules);
     const tokenId = contractAddress || `${presetName}:${ticker}`;
     const dataIndex = Number(row?.dataset?.index);
@@ -246,6 +294,14 @@
       volume,
       ...tx,
       ...auditBadges,
+      top10Pct: auditBadges.topHolders || '',
+      bundlersPct: auditBadges.bundlePct || '',
+      devPct: auditBadges.insiderPct || '',
+      // Keep null when unavailable to avoid false assumptions in execution logic.
+      lpBurned: null,
+      detailsLink,
+      socialLink,
+      tokenLinks,
       platform,
       pageOrder,
       audit,
