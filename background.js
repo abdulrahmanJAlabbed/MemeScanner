@@ -22,6 +22,7 @@ const KEYS = {
 const MAX_LOGS = 200;
 const MAX_FEED_ITEMS = 220;
 const openPlatformLocks = new Map();
+const PLATFORM_LOCK_STALE_MS = 3000;
 const SCAN_ALARM = 'memeScannerScanKick';
 
 const DEFAULT_SETTINGS = {
@@ -93,7 +94,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  removeTrackedTabById(tabId);
+  removeTrackedTabById(tabId).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -541,48 +542,76 @@ async function openOrReusePlatformTab(targetUrl) {
   const host = new URL(targetUrl).hostname;
 
   if (openPlatformLocks.has(host)) {
-    return openPlatformLocks.get(host);
+    const lockData = openPlatformLocks.get(host);
+    if (lockData && Date.now() - Number(lockData.timestamp || 0) <= PLATFORM_LOCK_STALE_MS) {
+      return lockData.promise;
+    }
+    openPlatformLocks.delete(host);
   }
 
   const run = (async () => {
-  const pattern = getPlatformPattern(host);
-  const existing = await chrome.tabs.query({ url: pattern });
+    const pattern = getPlatformPattern(host);
+    const existing = await chrome.tabs.query({ url: pattern });
 
-  let tab;
-  if (existing.length) {
-    tab = existing[0];
-    await chrome.tabs.update(tab.id, {
-      url: targetUrl,
-      pinned: !!settings.launchPinned,
-      autoDiscardable: false,
-      active: settings.launchInBackground ? false : true
-    });
-    if (!settings.launchInBackground && tab.windowId) {
-      await chrome.windows.update(tab.windowId, { focused: true });
+    let validTab = null;
+    for (const candidate of existing) {
+      if (!candidate?.id) {
+        continue;
+      }
+      try {
+        const aliveTab = await chrome.tabs.get(candidate.id);
+        if (!aliveTab?.id) {
+          await removeTrackedTabById(candidate.id);
+          continue;
+        }
+        validTab = aliveTab;
+        break;
+      } catch {
+        await removeTrackedTabById(candidate.id);
+      }
     }
-    await appendLog(`Reused tracked tab for ${host}.`);
-  } else {
-    tab = await chrome.tabs.create({
-      url: targetUrl,
-      pinned: !!settings.launchPinned,
-      autoDiscardable: false,
-      active: settings.launchInBackground ? false : true
-    });
-    await appendLog(`Opened tracked tab for ${host}.`);
-  }
 
-  await chrome.tabs.update(tab.id, { autoDiscardable: false });
-  await registerTrackedTab(host, tab.id);
+    let tab;
+    if (validTab?.id) {
+      tab = await chrome.tabs.update(validTab.id, {
+        url: targetUrl,
+        pinned: !!settings.launchPinned,
+        autoDiscardable: false,
+        active: settings.launchInBackground ? false : true
+      });
+      if (!settings.launchInBackground && tab?.windowId) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      await appendLog(`Reused tracked tab for ${host}.`);
+    } else {
+      tab = await chrome.tabs.create({
+        url: targetUrl,
+        pinned: !!settings.launchPinned,
+        autoDiscardable: false,
+        active: settings.launchInBackground ? false : true
+      });
+      await appendLog(`Opened tracked tab for ${host}.`);
+    }
 
-  await applyLiveItemsZoomToTab(tab.id, Number(settings.liveItemsTarget || 10));
-  setTimeout(() => {
-    forceScanOnTab(tab.id);
-  }, 700);
+    if (!tab?.id) {
+      throw new Error(`Failed to open platform tab for ${host}.`);
+    }
 
-  return { tabId: tab.id, reused: !!existing.length };
+    await chrome.tabs.update(tab.id, { autoDiscardable: false });
+    await registerTrackedTab(host, tab.id);
+
+    await applyLiveItemsZoomToTab(tab.id, Number(settings.liveItemsTarget || 10));
+    setTimeout(() => {
+      forceScanOnTab(tab.id);
+    }, 700);
+
+    return { tabId: tab.id, reused: !!validTab?.id };
   })();
 
-  openPlatformLocks.set(host, run);
+  openPlatformLocks.set(host, {
+    promise: run,
+    timestamp: Date.now()
+  });
   try {
     return await run;
   } finally {
@@ -696,6 +725,7 @@ async function removeTrackedTabById(tabId) {
   for (const [host, id] of Object.entries(trackedTabs)) {
     if (id === tabId) {
       delete trackedTabs[host];
+      openPlatformLocks.delete(host);
       changed = true;
     }
   }

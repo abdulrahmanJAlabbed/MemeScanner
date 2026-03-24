@@ -264,7 +264,8 @@
     ].join('|');
   }
 
-  function patchChangedTokens(previousMap, nextTokens) {
+  function patchChangedTokens(previousMap, nextTokens, options = {}) {
+    const skipRemoval = !!options.skipRemoval;
     const nextMap = new Map(previousMap);
     const changed = [];
     const removed = [];
@@ -280,11 +281,13 @@
       }
     }
 
-    const nextKeys = new Set(nextTokens.map((token) => token.tokenId));
-    for (const key of nextMap.keys()) {
-      if (!nextKeys.has(key)) {
-        removed.push(key);
-        nextMap.delete(key);
+    if (!skipRemoval) {
+      const nextKeys = new Set(nextTokens.map((token) => token.tokenId));
+      for (const key of nextMap.keys()) {
+        if (!nextKeys.has(key)) {
+          removed.push(key);
+          nextMap.delete(key);
+        }
       }
     }
 
@@ -294,10 +297,24 @@
   function safeExtractTokens(root, preset) {
     try {
       const rows = root.querySelectorAll(preset.row || 'div[data-index]');
-      const parsed = [];
+      return safeExtractTokensFromRows(rows, preset);
+    } catch (error) {
+      console.warn(`${EXT_TAG} extraction failed`, error);
+      return [];
+    }
+  }
 
-      rows.forEach((row, index) => {
-        const token = parseRow(row, preset.name || 'unknown', preset.auditRules || [], index);
+  function safeExtractTokensFromRows(rows, preset) {
+    try {
+      const parsed = [];
+      const rowList = Array.from(rows || []);
+
+      rowList.forEach((row, index) => {
+        if (!(row instanceof Element)) {
+          return;
+        }
+        const fallbackOrder = Number.isFinite(Number(row?.dataset?.index)) ? Number(row.dataset.index) : index;
+        const token = parseRow(row, preset.name || 'unknown', preset.auditRules || [], fallbackOrder);
         if (token) {
           parsed.push(token);
         }
@@ -305,7 +322,7 @@
 
       return parsed;
     } catch (error) {
-      console.warn(`${EXT_TAG} extraction failed`, error);
+      console.warn(`${EXT_TAG} row extraction failed`, error);
       return [];
     }
   }
@@ -313,6 +330,7 @@
   globalThis.MemeScannerContent = {
     getPresetForHost,
     safeExtractTokens,
+    safeExtractTokensFromRows,
     patchChangedTokens,
     getManifestScraperConfig
   };

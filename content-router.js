@@ -14,7 +14,7 @@
   const TAG = '[MemeScanner Router]';
   const runtimeConfig = globalThis.MemeScannerContent?.getManifestScraperConfig?.() || {};
   const debounceMs = Number(runtimeConfig.debounceMs || 140);
-  const pollMs = Math.max(300, Number(runtimeConfig.refreshMs || runtimeConfig.updateIntervalMs || 700));
+  const pollMs = Math.max(1500, Number(runtimeConfig.refreshMs || runtimeConfig.updateIntervalMs || 700));
 
   let previousFingerprintMap = new Map();
   let observer = null;
@@ -26,6 +26,9 @@
   let lastBatchStatusAt = 0;
   let lastZeroRowsStatusAt = 0;
   let pollingTimer = 0;
+  let pendingFullScan = false;
+  const pendingRows = new Set();
+  const rowTokenMap = new Map();
 
   if (!globalThis.MemeScannerContent) {
     return;
@@ -42,15 +45,15 @@
     sendStatus(`Router initialized for host ${window.location.hostname}`, { preset: preset.name });
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
     attachObserver();
-    pollingTimer = window.setInterval(scheduleScan, pollMs);
-    scheduleScan();
+    pollingTimer = window.setInterval(() => scheduleScan({ full: true }), pollMs);
+    scheduleScan({ full: true });
   }
 
   function onRuntimeMessage(message) {
     if (message?.type !== 'FORCE_SCAN') {
       return;
     }
-    scheduleScan();
+    scheduleScan({ full: true });
     sendStatus('Forced scan request received.');
   }
 
@@ -68,11 +71,8 @@
     }
 
     observer = new MutationObserver((mutations) => {
-      const shouldSchedule = mutations.some((mutation) => {
-        return mutation.type === 'childList' || mutation.type === 'characterData' || mutation.type === 'attributes';
-      });
-
-      if (!shouldSchedule) {
+      const updatedRows = collectUpdatedRows(mutations);
+      if (!updatedRows.length) {
         return;
       }
 
@@ -81,19 +81,29 @@
       }
 
       debounceTimer = window.setTimeout(() => {
-        scheduleScan();
+        scheduleScan({ rows: updatedRows });
       }, debounceMs);
     });
 
     observer.observe(root, {
-      childList: true,
+      childList: false,
       subtree: true,
       characterData: true,
-      attributes: true
+      attributes: false
     });
   }
 
-  function scheduleScan() {
+  function scheduleScan(options = {}) {
+    const rows = Array.isArray(options.rows) ? options.rows : [];
+    if (options.full) {
+      pendingFullScan = true;
+    }
+    rows.forEach((row) => {
+      if (row) {
+        pendingRows.add(row);
+      }
+    });
+
     if (document.visibilityState !== 'visible') {
       if (hiddenScanTimer) {
         clearTimeout(hiddenScanTimer);
@@ -126,9 +136,24 @@
       return;
     }
 
-    const extracted = globalThis.MemeScannerContent.safeExtractTokens(root, preset);
-    const patch = globalThis.MemeScannerContent.patchChangedTokens(previousFingerprintMap, extracted);
+    const shouldRunFullScan = pendingFullScan || pendingRows.size === 0;
+    const rowsToScan = shouldRunFullScan ? [] : Array.from(pendingRows);
+    pendingFullScan = false;
+    pendingRows.clear();
+
+    const extracted = shouldRunFullScan
+      ? globalThis.MemeScannerContent.safeExtractTokens(root, preset)
+      : globalThis.MemeScannerContent.safeExtractTokensFromRows(rowsToScan, preset);
+    const patch = globalThis.MemeScannerContent.patchChangedTokens(previousFingerprintMap, extracted, {
+      skipRemoval: !shouldRunFullScan
+    });
+    const replacedTokenIds = shouldRunFullScan ? [] : collectReplacedTokenIds(extracted);
+    const removedTokenIds = dedupeIds([...(patch.removed || []), ...replacedTokenIds]);
+
     previousFingerprintMap = patch.nextMap;
+    if (shouldRunFullScan) {
+      rebuildRowTokenMap(extracted);
+    }
 
     if (!extracted.length) {
       const now = Date.now();
@@ -145,7 +170,7 @@
       sendStatus(`Detected ${extracted.length} rows from ${preset.name}.`);
     }
 
-    if (!patch.changed.length && !patch.removed.length) {
+    if (!patch.changed.length && !removedTokenIds.length) {
       return;
     }
 
@@ -156,7 +181,7 @@
           source: preset.name,
           scannedAt: Date.now(),
           tokens: patch.changed,
-          removedTokenIds: patch.removed
+          removedTokenIds
         }
       },
       () => {
@@ -169,11 +194,66 @@
         if (now - lastBatchStatusAt > 4000) {
           lastBatchStatusAt = now;
           sendStatus(
-            `Sent ${patch.changed.length} changed / ${patch.removed.length} removed tokens (${extracted.length} scanned).`
+            `Sent ${patch.changed.length} changed / ${removedTokenIds.length} removed tokens (${extracted.length} scanned).`
           );
         }
       }
     );
+  }
+
+  function collectUpdatedRows(mutations) {
+    const rows = new Set();
+    for (const mutation of mutations) {
+      const row = findRowNode(mutation.target);
+      if (row) {
+        rows.add(row);
+      }
+    }
+    return Array.from(rows);
+  }
+
+  function findRowNode(node) {
+    if (!node) {
+      return null;
+    }
+    if (node instanceof Element) {
+      return node.closest(preset.row || 'div[data-index]');
+    }
+    const parent = node.parentElement;
+    return parent ? parent.closest(preset.row || 'div[data-index]') : null;
+  }
+
+  function collectReplacedTokenIds(tokens) {
+    const removed = [];
+    for (const token of tokens) {
+      const order = Number(token?.pageOrder);
+      const tokenId = token?.tokenId;
+      if (!Number.isFinite(order) || !tokenId) {
+        continue;
+      }
+      const prevTokenId = rowTokenMap.get(order);
+      if (prevTokenId && prevTokenId !== tokenId) {
+        removed.push(prevTokenId);
+      }
+      rowTokenMap.set(order, tokenId);
+    }
+    return removed;
+  }
+
+  function rebuildRowTokenMap(tokens) {
+    rowTokenMap.clear();
+    for (const token of tokens) {
+      const order = Number(token?.pageOrder);
+      const tokenId = token?.tokenId;
+      if (!Number.isFinite(order) || !tokenId) {
+        continue;
+      }
+      rowTokenMap.set(order, tokenId);
+    }
+  }
+
+  function dedupeIds(ids) {
+    return Array.from(new Set((ids || []).filter(Boolean)));
   }
 
   function safeRuntimeSendMessage(message, callback) {
