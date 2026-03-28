@@ -43,6 +43,7 @@ MemeScanner/
 	- In `chrome://extensions`, open extension details and verify background is a service worker.
 	- Open service worker console and confirm no startup/runtime errors.
 
+
 2. **Live feed stability (Zero-Flicker Engine)**
 	- Open a supported DEX page (for example Axiom discover view).
 	- Keep the page active while rows update rapidly.

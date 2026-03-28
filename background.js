@@ -154,8 +154,8 @@ function connectLocalIpc() {
           return;
         }
 
-        releaseTrackedTarget(msg.mint).catch(() => {});
-      } catch {}
+        releaseTrackedTarget(msg.mint).catch(() => { });
+      } catch { }
     });
 
     ws.addEventListener('close', () => {
@@ -213,7 +213,7 @@ function sendIpcTokenMetadata(token, sender) {
 
   try {
     localIpcSocket.send(JSON.stringify(payload));
-  } catch {}
+  } catch { }
 }
 
 function sendIpcTargetAcquired({ mint, mode, amountUsd, token, snipe }) {
@@ -295,8 +295,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  removeTrackedTabById(tabId).catch(() => {});
+  removeTrackedTabById(tabId).catch(() => { });
 });
+
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab?.url) {
@@ -308,7 +309,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
   registerTrackedTab(host, tabId)
     .then(() => forceScanOnTab(tabId))
-    .catch(() => {});
+    .catch(() => { });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -914,7 +915,7 @@ function forceScanOnTab(tabId) {
 
 function ensureScanAlarm(enabled) {
   if (!enabled) {
-    chrome.alarms.clear(SCAN_ALARM, () => {});
+    chrome.alarms.clear(SCAN_ALARM, () => { });
     return;
   }
 

@@ -12,7 +12,8 @@ const MemeUtils = (() => {
   // ───────────────────────────────────────────────────────────────
   //  DYNAMIC SELECTOR SCHEMA (V3.2)
   // ───────────────────────────────────────────────────────────────
-  
+
+
   const SELECTORS = {
     axiom: {
       container: 'section[aria-label="Table content"] div[style*="height"]',
