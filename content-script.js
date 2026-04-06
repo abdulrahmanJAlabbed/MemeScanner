@@ -8,12 +8,14 @@
       hosts: ['axiom.trade'],
       listContainer: "section[aria-label='Table content']",
       row: 'div[data-index]',
+      layout: 'table',
       auditRules: ['honeypot', 'mintAuthorityEnabled', 'freezeAuthorityEnabled']
     },
     gmgn: {
       hosts: ['gmgn.ai'],
-      listContainer: '#GlobalScrollDomId',
+      listContainer: '.g-table-body',
       row: 'div[data-index]',
+      layout: 'card',
       auditRules: ['honeypot', 'mintAuthorityEnabled']
     }
   };
@@ -63,6 +65,8 @@
     return null;
   }
 
+  // ─── Shared utilities ─────────────────────────────────────────
+
   function sanitizeText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -84,8 +88,6 @@
   function isLikelyMintAddress(value) {
     if (!value) return false;
     const cleaned = String(value).trim();
-
-    // Common meme mint form (ending in pump) and generic Solana-style addresses.
     if (/^[A-Za-z0-9]{24,}pump$/i.test(cleaned)) return true;
     if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(cleaned)) return true;
     return false;
@@ -136,7 +138,6 @@
       }
     }
 
-    // Fallback: many rows embed the mint in image URLs.
     const tokenImage = row.querySelector("img[src*='axiomtrading'],img[src*='axiom-assets'],img[src*='cdn']");
     if (tokenImage) {
       const src = tokenImage.getAttribute('src') || '';
@@ -146,7 +147,6 @@
       }
     }
 
-    // Last fallback: scan raw row text for a candidate address.
     const rowTextMatch = extractAddressFromText(row.textContent || '');
     if (rowTextMatch) {
       return rowTextMatch;
@@ -156,10 +156,15 @@
   }
 
   function detectPlatform(row) {
+    // Axiom badges
     const badgeIcon = row.querySelector('img[alt="Pump"],img[alt="Raydium"],img[alt="BONK"],img[alt="Moonshot"]');
     if (badgeIcon) {
       return sanitizeText(badgeIcon.getAttribute('alt')).toLowerCase();
     }
+
+    // GMGN: pump.fun link presence
+    const pumpLink = row.querySelector('a[href*="pump.fun"]');
+    if (pumpLink) return 'pump';
 
     const text = sanitizeText(row.innerText || '').toLowerCase();
     if (text.includes('pump.fun')) return 'pump';
@@ -168,7 +173,33 @@
     return '';
   }
 
-  function extractAuditBadges(auditColumn) {
+  function runAuditSuite(row, rules) {
+    const text = sanitizeText(row?.innerText || '').toLowerCase();
+    const findings = [];
+
+    if (!Array.isArray(rules)) {
+      return { riskScore: 0, findings };
+    }
+
+    if (rules.includes('honeypot') && /honeypot/.test(text)) {
+      findings.push('Honeypot mention detected');
+    }
+
+    if (rules.includes('mintAuthorityEnabled') && /mint authority\s*(enabled|on|true)/.test(text)) {
+      findings.push('Mint authority enabled');
+    }
+
+    if (rules.includes('freezeAuthorityEnabled') && /freeze authority\s*(enabled|on|true)/.test(text)) {
+      findings.push('Freeze authority enabled');
+    }
+
+    const riskScore = Math.min(100, findings.length * 30);
+    return { riskScore, findings };
+  }
+
+  // ─── Axiom-specific extraction (existing logic, untouched) ────
+
+  function extractAxiomAuditBadges(auditColumn) {
     const result = {
       topHolders: '',
       insiderPct: '',
@@ -206,7 +237,7 @@
     return result;
   }
 
-  function extractTransactions(txColumn) {
+  function extractAxiomTransactions(txColumn) {
     if (!txColumn) {
       return { txTotal: '', txBuys: '', txSells: '' };
     }
@@ -217,31 +248,7 @@
     return { txTotal, txBuys, txSells };
   }
 
-  function runAuditSuite(row, rules) {
-    const text = sanitizeText(row?.innerText || '').toLowerCase();
-    const findings = [];
-
-    if (!Array.isArray(rules)) {
-      return { riskScore: 0, findings };
-    }
-
-    if (rules.includes('honeypot') && /honeypot/.test(text)) {
-      findings.push('Honeypot mention detected');
-    }
-
-    if (rules.includes('mintAuthorityEnabled') && /mint authority\s*(enabled|on|true)/.test(text)) {
-      findings.push('Mint authority enabled');
-    }
-
-    if (rules.includes('freezeAuthorityEnabled') && /freeze authority\s*(enabled|on|true)/.test(text)) {
-      findings.push('Freeze authority enabled');
-    }
-
-    const riskScore = Math.min(100, findings.length * 30);
-    return { riskScore, findings };
-  }
-
-  function parseRow(row, presetName, auditRules, fallbackOrder = 0) {
+  function parseAxiomRow(row, presetName, auditRules, fallbackOrder = 0) {
     const flexRow = row.querySelector('.group > div') || row;
     const directColumns = Array.from(flexRow.children || []);
 
@@ -284,8 +291,8 @@
         row.querySelector("[data-volume],.volume")?.textContent ||
         ''
     );
-    const tx = extractTransactions(txCol);
-    const auditBadges = extractAuditBadges(auditCol);
+    const tx = extractAxiomTransactions(txCol);
+    const auditBadges = extractAxiomAuditBadges(auditCol);
     const platform = detectPlatform(row) || presetName;
 
     const tokenLinks = collectTokenLinks(row);
@@ -321,7 +328,6 @@
       top10Pct: auditBadges.topHolders || '',
       bundlersPct: auditBadges.bundlePct || '',
       devPct: auditBadges.insiderPct || '',
-      // Keep null when unavailable to avoid false assumptions in execution logic.
       lpBurned: null,
       detailsLink,
       socialLink,
@@ -333,12 +339,345 @@
     };
   }
 
+  // ─── GMGN-specific extraction (NEW) ──────────────────────────
+
+  /**
+   * Extract the labeled value pairs from GMGN's Volume component.
+   * Structure: multiple child divs, each with a label span ("V","MC") and a value span.
+   */
+  function extractGmgnVolumeBlock(row) {
+    const result = { volume: '', marketCap: '' };
+    const volumeContainer = row.querySelector("div[data-sentry-component='Volume']");
+    if (!volumeContainer) return result;
+
+    const items = volumeContainer.querySelectorAll(':scope > div');
+    items.forEach((item) => {
+      const label = sanitizeText(item.querySelector('span.text-text-300')?.textContent || '').toUpperCase();
+      const valueSpans = item.querySelectorAll('span');
+      const valueCandidates = Array.from(valueSpans).filter(
+        (s) => !s.classList.contains('text-text-300') && sanitizeText(s.textContent)
+      );
+      const value = sanitizeText(valueCandidates[valueCandidates.length - 1]?.textContent || '');
+      if (label === 'V') result.volume = value;
+      if (label === 'MC') result.marketCap = value;
+    });
+
+    return result;
+  }
+
+  /**
+   * Extract the flow row: Funding (F), Net Flow (N), TX count with buy/sell ratio.
+   */
+  function extractGmgnFlowBlock(row) {
+    const result = { funding: '', netFlow: '', txTotal: '', txBuys: '', txSells: '', buyRatio: '' };
+
+    // The flow row is the div with pl-[2px] class that contains F, N, TX labels
+    const flowContainers = row.querySelectorAll("div[class*='pl-[2px]']");
+    for (const container of flowContainers) {
+      const innerItems = container.querySelectorAll(':scope > div, :scope > span');
+      innerItems.forEach((item) => {
+        const text = sanitizeText(item.textContent || '');
+        const label = sanitizeText(item.querySelector('span.text-text-300, div.text-text-300')?.textContent || '').toUpperCase();
+
+        if (label === 'F') {
+          const valNode = item.querySelector('span.text-text-100');
+          result.funding = sanitizeText(valNode?.textContent || '');
+        }
+        if (label === 'N') {
+          const valNode = item.querySelector('span.text-increase-100, span.text-decrease-100, span.text-text-100');
+          result.netFlow = sanitizeText(valNode?.textContent || '');
+        }
+        if (label === 'TX') {
+          const valNode = item.querySelector('span.text-text-100');
+          result.txTotal = sanitizeText(valNode?.textContent || '');
+
+          // The buy/sell ratio is encoded in the gradient bar
+          const barEl = item.querySelector("div[style*='linear-gradient']");
+          if (barEl) {
+            const style = barEl.getAttribute('style') || '';
+            const pctMatch = style.match(/(\d+(?:\.\d+)?)%/);
+            if (pctMatch) {
+              const buyPct = parseFloat(pctMatch[1]);
+              result.buyRatio = `${buyPct}%`;
+              const total = Number(result.txTotal) || 0;
+              if (total > 0) {
+                result.txBuys = String(Math.round(total * buyPct / 100));
+                result.txSells = String(total - Number(result.txBuys));
+              }
+            }
+          }
+        }
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Extract holder metrics from GMGN's HolderView component.
+   * These are the icon+number pairs: smart money, KOL, pump replies, holders, bots, watchers.
+   */
+  function extractGmgnHolderMetrics(row) {
+    const result = {
+      smartMoney: '',
+      smartDegen: '',
+      pumpReplies: '',
+      holders: '',
+      botCount: '',
+      watchers: ''
+    };
+
+    const holderView = row.querySelector("div[data-sentry-component='HolderView']");
+    if (!holderView) return result;
+
+    const groups = holderView.querySelectorAll(':scope > div');
+    const values = [];
+    groups.forEach((group) => {
+      const spans = group.querySelectorAll('span');
+      const lastSpan = spans[spans.length - 1];
+      if (lastSpan) {
+        values.push(sanitizeText(lastSpan.textContent || ''));
+      }
+    });
+
+    // GMGN HolderView order: smart money, KOL/degen, pump replies, holders, bots, watchers
+    if (values.length >= 1) result.smartMoney = values[0];
+    if (values.length >= 2) result.smartDegen = values[1];
+    if (values.length >= 3) result.pumpReplies = values[2];
+    if (values.length >= 4) result.holders = values[3];
+    if (values.length >= 5) result.botCount = values[4];
+    if (values.length >= 6) result.watchers = values[5];
+
+    return result;
+  }
+
+  /**
+   * Extract the bottom tag badges: dev%, bundler%, insider%, rat%, bluechip%, top holders%.
+   * These are pill-shaped elements with SVG icons and percentage text.
+   */
+  function extractGmgnTagBadges(row) {
+    const result = {
+      devSoldPct: '',
+      devSoldAge: '',
+      ratPct: '',
+      bundlePct: '',
+      insiderPct: '',
+      bluechipPct: '',
+      topHoldersPct: '',
+      sniperPct: '',
+      targetPct: ''
+    };
+
+    // The badge row is the flex container with h-[24px] gap-[4px]
+    const badgeRows = row.querySelectorAll("div[class*='h-[24px]'][class*='gap-[4px]'][class*='font-medium']");
+    for (const badgeRow of badgeRows) {
+      const badges = badgeRow.querySelectorAll(':scope > div');
+      const extractedValues = [];
+
+      badges.forEach((badge) => {
+        const innerDiv = badge.querySelector('div[style*="transform"]') || badge;
+        const textParts = [];
+        innerDiv.querySelectorAll('span, div:not(:has(svg))').forEach((el) => {
+          const t = sanitizeText(el.textContent || '');
+          if (t) textParts.push(t);
+        });
+
+        // Get the raw text next to the SVG icon
+        let rawText = sanitizeText(innerDiv.textContent || '');
+        extractedValues.push(rawText);
+      });
+
+      // GMGN badge order: Star(devHolding%), Cloud(devSold), Rat%, Bundle%, Insider%, Sniper%, Plant%, Target%
+      if (extractedValues.length >= 1) result.devSoldPct = extractedValues[0];
+      if (extractedValues.length >= 2) {
+        // Dev sold badge often includes age like "DS 16s" or just "0%"
+        const ds = extractedValues[1];
+        const dsMatch = ds.match(/DS\s*(.+)/i);
+        if (dsMatch) {
+          result.devSoldAge = dsMatch[1];
+        } else {
+          result.devSoldAge = ds;
+        }
+      }
+      if (extractedValues.length >= 3) result.ratPct = extractedValues[2];
+      if (extractedValues.length >= 4) result.bundlePct = extractedValues[3];
+      if (extractedValues.length >= 5) result.insiderPct = extractedValues[4];
+      if (extractedValues.length >= 6) result.sniperPct = extractedValues[5];
+      if (extractedValues.length >= 7) result.bluechipPct = extractedValues[6];
+      if (extractedValues.length >= 8) result.topHoldersPct = extractedValues[7];
+    }
+
+    return result;
+  }
+
+  /**
+   * Extract Twitter handle and follower count from GMGN cards.
+   */
+  function extractGmgnSocials(row) {
+    const result = { twitterHandle: '', twitterFollowers: '', socialLink: '', websiteLink: '' };
+
+    // Twitter handle: the @username link
+    const twitterHandleEl = row.querySelector("a[aria-label='twitter'][class*='text-xblue-100']");
+    if (twitterHandleEl) {
+      result.twitterHandle = sanitizeText(twitterHandleEl.textContent || '');
+    }
+
+    // Twitter link
+    const twitterLink = row.querySelector("a[aria-label='twitter']");
+    if (twitterLink) {
+      result.socialLink = sanitizeText(twitterLink.getAttribute('href') || '');
+    }
+
+    // Website link
+    const websiteLink = row.querySelector("a[aria-label='website']");
+    if (websiteLink) {
+      result.websiteLink = sanitizeText(websiteLink.getAttribute('href') || '');
+    }
+
+    // Follower count: the span near the people icon in the row below the handle
+    const followerSpans = row.querySelectorAll("span[class*='text-[11px]'][class*='font-[500]']");
+    followerSpans.forEach((span) => {
+      const text = sanitizeText(span.textContent || '');
+      // Pick the one that looks like a follower count (e.g., "1.9K", "454.6K", "0")
+      if (/^[\d.,]+[KMB]?$/i.test(text)) {
+        result.twitterFollowers = text;
+      }
+    });
+
+    return result;
+  }
+
+  /**
+   * Main GMGN row parser — extracts all available data from a GMGN card.
+   */
+  function parseGmgnRow(row, presetName, auditRules, fallbackOrder = 0) {
+    // Ticker
+    const tickerNode = row.querySelector("span[data-sentry-component='TooltipCopy']");
+    const ticker = sanitizeText(tickerNode?.textContent || '');
+    if (!ticker) return null;
+
+    // Name
+    const nameContainer = row.querySelector("div[data-sentry-component='TokenBaseInfo']");
+    const nameNode = nameContainer?.querySelector('div.truncate');
+    const name = sanitizeText(nameNode?.textContent || '');
+
+    // Age
+    const ageNode = row.querySelector('div.text-green-50');
+    const age = sanitizeText(ageNode?.textContent || '');
+    const ageSeconds = parseAgeToSeconds(age);
+
+    // Contract address from links
+    const contractAddress = extractContractAddress(row);
+    const tokenLinks = collectTokenLinks(row);
+    const detailsLink = tokenLinks.find((href) => /\/coin\/|\/token\/|\/t\//i.test(href)) || '';
+
+    // Volume & Market Cap
+    const volumeData = extractGmgnVolumeBlock(row);
+
+    // Flow row: Funding, Net Flow, TX
+    const flowData = extractGmgnFlowBlock(row);
+
+    // Holder metrics
+    const holderMetrics = extractGmgnHolderMetrics(row);
+
+    // Tag badges (dev%, bundler%, etc.)
+    const tagBadges = extractGmgnTagBadges(row);
+
+    // Socials
+    const socials = extractGmgnSocials(row);
+
+    // Platform detection
+    const platform = detectPlatform(row) || presetName;
+
+    // Audit
+    const audit = runAuditSuite(row, auditRules);
+
+    // Token identity
+    const tokenId = contractAddress || `${presetName}:${ticker}`;
+    const dataIndex = Number(row?.dataset?.index);
+    const pageOrder = Number.isFinite(dataIndex) ? dataIndex : fallbackOrder;
+
+    // Velocity calculation
+    const txBuysN = Number(flowData.txBuys || 0);
+    const txSellsN = Number(flowData.txSells || 0);
+    const txTotalN = Number(flowData.txTotal || txBuysN + txSellsN || 0);
+    const velocityScore = Number.isFinite(ageSeconds) && ageSeconds > 0
+      ? (Math.max(0, txBuysN - txSellsN) / Math.max(1, txTotalN)) * (txTotalN / ageSeconds)
+      : null;
+
+    return {
+      tokenId,
+      contractAddress,
+      ticker,
+      name,
+      age,
+      ageSeconds,
+      marketCap: volumeData.marketCap,
+      liquidity: flowData.funding,
+      volume: volumeData.volume,
+      txTotal: flowData.txTotal,
+      txBuys: flowData.txBuys,
+      txSells: flowData.txSells,
+      buyRatio: flowData.buyRatio,
+      netFlow: flowData.netFlow,
+      funding: flowData.funding,
+      velocityScore,
+      // Holder metrics
+      smartMoney: holderMetrics.smartMoney,
+      smartDegen: holderMetrics.smartDegen,
+      pumpReplies: holderMetrics.pumpReplies,
+      holders: holderMetrics.holders,
+      botCount: holderMetrics.botCount,
+      watchers: holderMetrics.watchers,
+      // Tag badges
+      topHolders: tagBadges.topHoldersPct,
+      top10Pct: tagBadges.topHoldersPct,
+      insiderPct: tagBadges.insiderPct,
+      bundlePct: tagBadges.bundlePct,
+      bundlersPct: tagBadges.bundlePct,
+      devPct: tagBadges.devSoldPct,
+      devSoldAge: tagBadges.devSoldAge,
+      ratPct: tagBadges.ratPct,
+      sniperPct: tagBadges.sniperPct,
+      bluechipPct: tagBadges.bluechipPct,
+      dexPaid: '',
+      proTraders: '',
+      lpBurned: null,
+      // Socials
+      socialLink: socials.socialLink,
+      twitterHandle: socials.twitterHandle,
+      twitterFollowers: socials.twitterFollowers,
+      websiteLink: socials.websiteLink,
+      // Navigation
+      detailsLink,
+      tokenLinks,
+      platform,
+      pageOrder,
+      audit,
+      updatedAt: Date.now()
+    };
+  }
+
+  // ─── Dispatcher ───────────────────────────────────────────────
+
+  function parseRow(row, presetName, auditRules, fallbackOrder = 0) {
+    if (presetName === 'gmgn') {
+      return parseGmgnRow(row, presetName, auditRules, fallbackOrder);
+    }
+    return parseAxiomRow(row, presetName, auditRules, fallbackOrder);
+  }
+
+  // ─── Diffing & batch helpers ──────────────────────────────────
+
   function buildFingerprint(token) {
     return [
       token.marketCap,
       token.liquidity,
       token.volume,
       token.age,
+      token.netFlow || '',
+      token.txTotal || '',
+      token.holders || '',
       token.audit?.riskScore || 0,
       token.pageOrder
     ].join('|');

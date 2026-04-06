@@ -1,18 +1,17 @@
 /**
- * MemeScanner Pro V3 — Shared Architectural Utilities
+ * MemeScanner Pro V4 — Shared Architectural Utilities
  * 
  * - Standardized Selector Schema for multi-platform resilience
  * - High-precision numerical parsing
- * - Filter engine V3 with extended metric support
+ * - Filter engine V4 with GMGN-specific metric support
  */
 
 const MemeUtils = (() => {
   'use strict';
 
   // ───────────────────────────────────────────────────────────────
-  //  DYNAMIC SELECTOR SCHEMA (V3.2)
+  //  DYNAMIC SELECTOR SCHEMA (V4)
   // ───────────────────────────────────────────────────────────────
-
 
   const SELECTORS = {
     axiom: {
@@ -25,10 +24,16 @@ const MemeUtils = (() => {
       mcChange: 'span[class*="font-GeistMono"]'
     },
     gmgn: {
-      container: '#GlobalScrollDomId div[data-index]',
+      container: '.g-table-body',
       row: 'div[data-index]',
-      ticker: '.ticker',
-      name: '.name'
+      ticker: "span[data-sentry-component='TooltipCopy']",
+      name: "div[data-sentry-component='TokenBaseInfo'] div.truncate",
+      age: 'div.text-green-50',
+      volumeContainer: "div[data-sentry-component='Volume']",
+      flowContainer: "div[class*='pl-[2px]']",
+      holderView: "div[data-sentry-component='HolderView']",
+      twitter: "a[aria-label='twitter']",
+      website: "a[aria-label='website']"
     }
   };
 
@@ -41,7 +46,6 @@ const MemeUtils = (() => {
       if (!el) throw new Error(`Selector "${selector}" not found for ${label}`);
       return el;
     } catch (err) {
-      // In a production environment, this would log to a central telemetry system
       return null;
     }
   }
@@ -82,8 +86,14 @@ const MemeUtils = (() => {
     }
   }
 
+  function parsePercent(text) {
+    if (!text || typeof text !== 'string') return NaN;
+    const match = text.match(/-?\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : NaN;
+  }
+
   // ───────────────────────────────────────────────────────────────
-  //  FILTER ENGINE V3
+  //  FILTER ENGINE V4
   // ───────────────────────────────────────────────────────────────
 
   function matchesFilters(token, filters) {
@@ -135,6 +145,21 @@ const MemeUtils = (() => {
     validateRange(token.topHolders, filters.top10Holders, 'Top10');
     validateRange(token.bundlePct, filters.bundlersPercentage, 'Bundlers');
 
+    // New V4 filters for GMGN-specific data
+    if (filters.requireSocials && !token.socialLink && !token.twitterHandle) {
+      reasons.push('No social links');
+    }
+
+    if (filters.minSmartMoney) {
+      const sm = Number(token.smartMoney || 0);
+      if (sm < filters.minSmartMoney) reasons.push(`SmartMoney ${sm} < ${filters.minSmartMoney}`);
+    }
+
+    if (filters.minTwitterFollowers) {
+      const followers = parseValue(token.twitterFollowers || '0');
+      if (followers < filters.minTwitterFollowers) reasons.push(`Followers ${token.twitterFollowers} < ${filters.minTwitterFollowers}`);
+    }
+
     return { passed: reasons.length === 0, reasons };
   }
 
@@ -148,6 +173,7 @@ const MemeUtils = (() => {
     safeQuery,
     parseAge,
     parseValue,
+    parsePercent,
     matchesFilters,
     formatTimestamp
   };

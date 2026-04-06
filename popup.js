@@ -297,23 +297,56 @@
   }
 
   function renderAdvancedDetails(token) {
-    return `
+    // Determine which extra fields are available (GMGN cards provide more data)
+    const hasGmgnData = !!(token.smartMoney || token.netFlow || token.twitterHandle || token.watchers);
+
+    let html = `
       <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📈</span>TXNS</span><strong>${escapeHtml(token.txTotal || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📈</span>TXNS</span><strong>${escapeHtml(token.txTotal || '—')}${token.buyRatio ? ` (${escapeHtml(token.buyRatio)} buy)` : ''}</strong></div>
         <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">⚖️</span>Buys/Sells</span><strong>${escapeHtml([token.txBuys || '—', token.txSells || '—'].join('/'))}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👑</span>Top Holders</span><strong>${escapeHtml(token.topHolders || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👑</span>Top Holders</span><strong>${escapeHtml(token.topHolders || token.top10Pct || '—')}</strong></div>
       </div>
       <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📦</span>Bundlers</span><strong>${escapeHtml(token.bundlePct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🧑‍💻</span>Dev/Insider</span><strong>${escapeHtml(token.insiderPct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🎯</span>Snipers/Bots</span><strong>${escapeHtml([token.sniperPct || '—', token.botPct || '—'].join('/'))}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📦</span>Bundlers</span><strong>${escapeHtml(token.bundlePct || token.bundlersPct || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🧑‍💻</span>Dev/Insider</span><strong>${escapeHtml(token.insiderPct || token.devPct || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🎯</span>Snipers/Bots</span><strong>${escapeHtml([token.sniperPct || '—', token.botCount || token.botPct || '—'].join('/'))}</strong></div>
       </div>
       <div class="metrics mono" style="margin-top:8px;">
         <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👥</span>Holders</span><strong>${escapeHtml(token.holders || '—')}</strong></div>
         <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🧠</span>Pro Traders</span><strong>${escapeHtml(token.proTraders || '—')}</strong></div>
         <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">✅</span>DEX Paid</span><strong>${escapeHtml(token.dexPaid || '—')}</strong></div>
+      </div>`;
+
+    if (hasGmgnData) {
+      html += `
+      <div class="metrics mono" style="margin-top:8px;">
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💎</span>Smart $</span><strong>${escapeHtml(token.smartMoney || '0')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🔥</span>KOL/Degen</span><strong>${escapeHtml(token.smartDegen || '0')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👁</span>Watchers</span><strong>${escapeHtml(token.watchers || '0')}</strong></div>
       </div>
-    `;
+      <div class="metrics mono" style="margin-top:8px;">
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💰</span>Net Flow</span><strong>${escapeHtml(token.netFlow || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🏦</span>Funding</span><strong>${escapeHtml(token.funding || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">☁️</span>Dev Sold</span><strong>${escapeHtml(token.devSoldAge || '—')}</strong></div>
+      </div>`;
+
+      if (token.twitterHandle) {
+        html += `
+      <div class="metrics mono" style="margin-top:8px;">
+        <div class="metric" style="flex:2"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🐦</span>Twitter</span><strong>${escapeHtml(token.twitterHandle)}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👤</span>Followers</span><strong>${escapeHtml(token.twitterFollowers || '0')}</strong></div>
+      </div>`;
+      }
+
+      html += `
+      <div class="metrics mono" style="margin-top:8px;">
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🐀</span>Rat %</span><strong>${escapeHtml(token.ratPct || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💎</span>BlueChip</span><strong>${escapeHtml(token.bluechipPct || '—')}</strong></div>
+        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💬</span>Replies</span><strong>${escapeHtml(token.pumpReplies || '—')}</strong></div>
+      </div>`;
+    }
+
+    return html;
   }
 
   function renderLogs(container, logs) {

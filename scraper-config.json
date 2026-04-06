@@ -7,6 +7,7 @@
       "hosts": ["axiom.trade"],
       "listContainer": "section[aria-label='Table content']",
       "row": "div[data-index]",
+      "layout": "table",
       "fields": {
         "ticker": "div.truncate",
         "age": "span[class*='text-primaryGreen']",
@@ -20,17 +21,18 @@
       "hosts": ["gmgn.ai"],
       "listContainer": ".g-table-body",
       "row": "div[data-index]",
+      "layout": "card",
       "fields": {
         "ticker": "span[data-sentry-component='TooltipCopy']",
         "name": "div[data-sentry-component='TokenBaseInfo'] div.truncate",
-        "age": "div.text-green-50.font-medium",
-        "marketCap": "div[data-sentry-component='Volume'] > div:nth-child(2) > span:nth-child(2)",
-        "volume": "div[data-sentry-component='Volume'] > div:nth-child(1) > span:nth-child(2)",
-        "liquidity": "div[class*='pl-[2px]'] > div:nth-child(1) > span.text-text-100",
-        "txCount": "div[class*='pl-[2px]'] > div:nth-child(3) > span.text-text-100",
+        "age": "div.text-green-50",
+        "address": "div[data-sentry-element='SimulateLinkByConfig']",
+        "volumeContainer": "div[data-sentry-component='Volume']",
+        "flowContainer": "div[class*='pl-[2px]']",
         "twitter": "a[aria-label='twitter']",
         "website": "a[aria-label='website']",
-        "holders": "div[data-sentry-component='HolderView']"
+        "holderView": "div[data-sentry-component='HolderView']",
+        "tagBadges": "div.flex.h-\\[24px\\].gap-\\[4px\\]"
       },
       "auditRules": ["honeypot", "mintAuthorityEnabled"]
     }
