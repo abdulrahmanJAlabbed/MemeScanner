@@ -168,6 +168,320 @@ const MemeUtils = (() => {
     return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
   }
 
+  // ───────────────────────────────────────────────────────────────
+  //  ADVANCED FILTER ENGINE — 4 Battle-Tested Plans (April 2026)
+  //  Works PURELY from DOM-scraped fields. No API/CLI needed.
+  // ───────────────────────────────────────────────────────────────
+
+  const FILTER_PLANS = {
+    conservative: {
+      name: 'Conservative',
+      devMax: 3,
+      insiderMax: 5,
+      bundleMax: 1,
+      sniperMax: 8,
+      ratMax: 10,
+      combinedRiskMax: 8,
+      topHoldersMax: 25,
+      holdersMin: 250,
+      smartMoneyMin: 4,
+      buyRatioMin: 65,
+      mcapMax: 120000,
+      ageMaxSeconds: 480,   // 8 minutes
+      velocityMin: 0,
+      minScore: 90
+    },
+    balanced: {
+      name: 'Balanced',
+      devMax: 5,
+      insiderMax: 8,
+      bundleMax: 5,
+      sniperMax: 10,
+      ratMax: 15,
+      combinedRiskMax: 12,
+      topHoldersMax: 32,
+      holdersMin: 180,
+      smartMoneyMin: 3,
+      buyRatioMin: 60,
+      mcapMax: 150000,
+      ageMaxSeconds: 600,   // 10 minutes
+      velocityMin: 0,
+      minScore: 75
+    },
+    aggressive: {
+      name: 'Aggressive',
+      devMax: 7,
+      insiderMax: 10,
+      bundleMax: 8,
+      sniperMax: 15,
+      ratMax: 20,
+      combinedRiskMax: 15,
+      topHoldersMax: 38,
+      holdersMin: 120,
+      smartMoneyMin: 2,
+      buyRatioMin: 55,
+      mcapMax: 80000,
+      ageMaxSeconds: 360,   // 6 minutes
+      velocityMin: 0,
+      minScore: 65
+    },
+    hybrid: {
+      name: 'Hybrid',
+      devMax: 5,
+      insiderMax: 8,
+      bundleMax: 5,
+      sniperMax: 10,
+      ratMax: 15,
+      combinedRiskMax: 12,
+      topHoldersMax: 32,
+      holdersMin: 180,
+      smartMoneyMin: 3,
+      buyRatioMin: 60,
+      mcapMax: 150000,
+      ageMaxSeconds: 600,
+      velocityMin: 0,
+      minScore: 70
+    }
+  };
+
+  /**
+   * Parse a scraped string value into a usable number.
+   * Handles: "9%", "$1.8K", "44m", "0.5%", "+$21K", "3", "0", "", etc.
+   */
+  function toNum(val) {
+    if (typeof val === 'number' && Number.isFinite(val)) return val;
+    if (!val) return 0;
+    const s = String(val).trim();
+
+    // Pure number
+    const directNum = Number(s);
+    if (Number.isFinite(directNum)) return directNum;
+
+    // Percentage: "9%", "0.5%"
+    const pctMatch = s.match(/^(-?\d+(?:\.\d+)?)\s*%$/);
+    if (pctMatch) return parseFloat(pctMatch[1]);
+
+    // Dollar + suffix: "$1.8K", "+$21K", "-$500"
+    return parseValue(s);
+  }
+
+  /**
+   * Evaluate a single token against one of the 4 filter plans.
+   * Returns a full decision object with every check logged.
+   *
+   * ALL data comes from the extension's DOM scraping — zero API/CLI calls.
+   */
+  function evaluateToken(token, selectedPlan) {
+    const planKey = selectedPlan || 'balanced';
+    const plan = FILTER_PLANS[planKey] || FILTER_PLANS.balanced;
+    const checks = {};
+    let score = 100;
+
+    // ── Parse scraped strings into numbers ──
+    const devPct = toNum(token.devPct || token.devSoldPct);
+    const insider = toNum(token.insiderPct);
+    const bundle = toNum(token.bundlePct || token.bundlersPct);
+    const sniper = toNum(token.sniperPct);
+    const rat = toNum(token.ratPct);
+    const topHolders = toNum(token.topHolders || token.top10Pct || token.topHoldersPct);
+    const holders = toNum(token.holders);
+    const smartMoney = toNum(token.smartMoney);
+    const buyRatio = toNum(token.buyRatio);
+    const mcap = toNum(token.marketCap);
+    const ageSec = typeof token.ageSeconds === 'number' ? token.ageSeconds : parseAge(token.age);
+    const velocity = typeof token.velocityScore === 'number' ? token.velocityScore : 0;
+    const netFlow = toNum(token.netFlow);
+    const hasSocials = !!(token.socialLink || token.twitterHandle || token.websiteLink);
+    const twitterFollowers = toNum(token.twitterFollowers);
+
+    // ── 1. Dev & Risk checks ──
+    const combinedRisk = insider + bundle + sniper + rat;
+
+    checks.dev = {
+      passed: devPct <= plan.devMax,
+      value: devPct,
+      threshold: plan.devMax,
+      label: 'Dev Holding %'
+    };
+    checks.insider = {
+      passed: insider <= plan.insiderMax,
+      value: insider,
+      threshold: plan.insiderMax,
+      label: 'Insider %'
+    };
+    checks.bundle = {
+      passed: bundle <= plan.bundleMax,
+      value: bundle,
+      threshold: plan.bundleMax,
+      label: 'Bundle %'
+    };
+    checks.sniper = {
+      passed: sniper <= plan.sniperMax,
+      value: sniper,
+      threshold: plan.sniperMax,
+      label: 'Sniper %'
+    };
+    checks.rat = {
+      passed: rat <= plan.ratMax,
+      value: rat,
+      threshold: plan.ratMax,
+      label: 'Rat %'
+    };
+    checks.combinedRisk = {
+      passed: combinedRisk <= plan.combinedRiskMax,
+      value: combinedRisk,
+      threshold: plan.combinedRiskMax,
+      label: 'Combined Risk (insider+bundle+sniper+rat)'
+    };
+
+    // ── 2. Holder concentration ──
+    checks.topHolders = {
+      passed: topHolders <= plan.topHoldersMax,
+      value: topHolders,
+      threshold: plan.topHoldersMax,
+      label: 'Top Holders %'
+    };
+
+    // ── 3. Momentum & Social signals ──
+    checks.holders = {
+      passed: holders >= plan.holdersMin,
+      value: holders,
+      threshold: plan.holdersMin,
+      label: 'Holder Count'
+    };
+    checks.smartMoney = {
+      passed: smartMoney >= plan.smartMoneyMin,
+      value: smartMoney,
+      threshold: plan.smartMoneyMin,
+      label: 'Smart Money'
+    };
+    checks.buyRatio = {
+      passed: buyRatio >= plan.buyRatioMin,
+      value: buyRatio,
+      threshold: plan.buyRatioMin,
+      label: 'Buy Ratio %'
+    };
+    checks.velocity = {
+      passed: velocity > plan.velocityMin,
+      value: Number(velocity.toFixed(4)),
+      threshold: plan.velocityMin,
+      label: 'Velocity Score'
+    };
+
+    // ── 4. Stage checks ──
+    checks.age = {
+      passed: Number.isFinite(ageSec) && ageSec <= plan.ageMaxSeconds,
+      value: ageSec,
+      threshold: plan.ageMaxSeconds,
+      label: 'Age (seconds)'
+    };
+    checks.mcap = {
+      passed: mcap > 0 && mcap <= plan.mcapMax,
+      value: mcap,
+      threshold: plan.mcapMax,
+      label: 'Market Cap ($)'
+    };
+    checks.netFlow = {
+      passed: netFlow > 0,
+      value: netFlow,
+      threshold: 0,
+      label: 'Net Flow ($)'
+    };
+
+    // ── 5. Social bonus (not a hard fail, but adds/removes score) ──
+    checks.socials = {
+      passed: hasSocials,
+      value: hasSocials ? (token.twitterHandle || 'yes') : 'none',
+      threshold: 'any',
+      label: 'Social Links'
+    };
+
+    // ── Calculate score ──
+    // Critical checks that MUST pass for any approval:
+    const criticalKeys = ['dev', 'combinedRisk', 'topHolders', 'age', 'mcap'];
+    const momentumKeys = ['holders', 'smartMoney', 'buyRatio', 'velocity', 'netFlow'];
+    const bonusKeys = ['socials'];
+
+    let criticalFails = 0;
+    let momentumFails = 0;
+
+    for (const key of criticalKeys) {
+      if (!checks[key].passed) {
+        score -= 15;
+        criticalFails++;
+      }
+    }
+    for (const key of momentumKeys) {
+      if (!checks[key].passed) {
+        score -= 8;
+        momentumFails++;
+      }
+    }
+    for (const key of bonusKeys) {
+      if (checks[key].passed) score += 3;
+      // No penalty for missing socials
+    }
+
+    score = Math.max(0, Math.min(100, score));
+
+    // ── Collect risk flags ──
+    const riskFlags = [];
+    for (const [key, check] of Object.entries(checks)) {
+      if (!check.passed && key !== 'socials') {
+        riskFlags.push(`${check.label}: ${check.value} (limit: ${check.threshold})`);
+      }
+    }
+
+    // ── Decision ──
+    const passesRules = score >= plan.minScore && criticalFails === 0;
+
+    let action = 'skip';
+    let suggestedSol = 0;
+    if (passesRules) {
+      if (score >= 90) { action = 'buy_medium'; suggestedSol = 0.05; }
+      else if (score >= 75) { action = 'buy_small'; suggestedSol = 0.03; }
+      else { action = 'watch'; suggestedSol = 0; }
+    }
+
+    return {
+      token_ca: token.contractAddress || token.tokenId || '',
+      ticker: token.ticker || '',
+      plan_used: plan.name,
+      passes_rules: passesRules,
+      score_0_to_100: Math.round(score),
+      recommended_action: action,
+      suggested_buy_sol: suggestedSol,
+      critical_fails: criticalFails,
+      momentum_fails: momentumFails,
+      individual_checks: checks,
+      risk_flags: riskFlags,
+      reasoning: `${plan.name} plan – ${passesRules ? 'PASS' : 'FAIL'} | Score ${Math.round(score)}/100 | ${criticalFails} critical fails, ${momentumFails} momentum fails | ${riskFlags.length} red flags`,
+      timestamp: Date.now(),
+      raw_token: {
+        ticker: token.ticker,
+        name: token.name,
+        contractAddress: token.contractAddress,
+        age: token.age,
+        marketCap: token.marketCap,
+        volume: token.volume,
+        netFlow: token.netFlow,
+        holders: token.holders,
+        smartMoney: token.smartMoney,
+        buyRatio: token.buyRatio,
+        devPct: token.devPct,
+        bundlePct: token.bundlePct,
+        insiderPct: token.insiderPct,
+        ratPct: token.ratPct,
+        sniperPct: token.sniperPct,
+        topHolders: token.topHolders,
+        twitterHandle: token.twitterHandle,
+        twitterFollowers: token.twitterFollowers,
+        velocityScore: token.velocityScore,
+        platform: token.platform
+      }
+    };
+  }
+
   return {
     SELECTORS,
     safeQuery,
@@ -175,7 +489,10 @@ const MemeUtils = (() => {
     parseValue,
     parsePercent,
     matchesFilters,
-    formatTimestamp
+    formatTimestamp,
+    FILTER_PLANS,
+    evaluateToken,
+    toNum
   };
 })();
 

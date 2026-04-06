@@ -17,7 +17,8 @@ const KEYS = {
   marketFeed: 'marketFeed',
   logs: 'logs',
   trackedTabs: 'trackedTabs',
-  trackedTargets: 'trackedTargets'
+  trackedTargets: 'trackedTargets',
+  filterDecisions: 'filterDecisions'
 };
 
 const MAX_LOGS = 200;
@@ -57,6 +58,7 @@ const DEFAULT_SETTINGS = {
     liquidity: { min: 0, max: 0 },
     volume: { min: 0, max: 0 }
   },
+  filterPlan: 'balanced',
   executionMode: 'paper',
   snipeFilters: {
     maxAgeSeconds: 120,
@@ -280,6 +282,52 @@ function sendIpcTargetAcquired({ mint, mode, amountUsd, token, snipe }) {
   } catch {
     return false;
   }
+}
+
+// Ring buffer for filter decisions (kept in memory, saved to storage periodically)
+const filterDecisionBuffer = [];
+const MAX_FILTER_DECISIONS = 100;
+
+function sendIpcFilterDecision(decision, sender) {
+  // Store locally for popup access
+  filterDecisionBuffer.push(decision);
+  if (filterDecisionBuffer.length > MAX_FILTER_DECISIONS) {
+    filterDecisionBuffer.shift();
+  }
+
+  // Periodically flush to chrome.storage (every 10 decisions to avoid thrashing)
+  if (filterDecisionBuffer.length % 10 === 0) {
+    chrome.storage.local.set({ [KEYS.filterDecisions]: filterDecisionBuffer.slice(-50) });
+  }
+
+  // Send over WebSocket to monitor.js
+  if (!localIpcSocket || !localIpcReady || localIpcSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  const payload = {
+    type: 'filter_decision',
+    authToken: LOCAL_IPC_AUTH_TOKEN,
+    payload: {
+      token_ca: decision.token_ca,
+      ticker: decision.ticker,
+      plan_used: decision.plan_used,
+      passes_rules: decision.passes_rules,
+      score: decision.score_0_to_100,
+      action: decision.recommended_action,
+      critical_fails: decision.critical_fails,
+      risk_flags: decision.risk_flags,
+      reasoning: decision.reasoning,
+      raw_token: decision.raw_token,
+      individual_checks: decision.individual_checks,
+      sourceHost: sender?.url ? new URL(sender.url).host : '',
+      timestamp: decision.timestamp
+    }
+  };
+
+  try {
+    localIpcSocket.send(JSON.stringify(payload));
+  } catch { }
 }
 
 function pushMetadataBatchToLocalIpc(tokens, sender) {
@@ -542,12 +590,25 @@ async function processMarketBatch(payload, sender) {
       sourceHost: sender?.url ? new URL(sender.url).host : ''
     };
 
-    tokenRecord.matchesFilters = true;
-    tokenRecord.filterReasons = [];
+    // ── Advanced Filter Engine evaluation ──
+    const filterPlan = state.settings.filterPlan || 'balanced';
+    const decision = MemeUtils.evaluateToken(tokenRecord, filterPlan);
+    tokenRecord.filterDecision = decision;
+    tokenRecord.matchesFilters = decision.passes_rules;
+    tokenRecord.filterReasons = decision.risk_flags;
+    tokenRecord.filterScore = decision.score_0_to_100;
+    tokenRecord.filterAction = decision.recommended_action;
+
+    // Send decision to IPC (monitor.js) for logging
+    sendIpcFilterDecision(decision, sender);
 
     const includeInFeed = true;
 
-    matchedCount += 1;
+    if (decision.passes_rules) {
+      matchedCount += 1;
+    } else {
+      rejectedCount += 1;
+    }
 
     if (includeInFeed) {
       feed[tokenId] = tokenRecord;

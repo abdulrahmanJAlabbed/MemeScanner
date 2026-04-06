@@ -27,6 +27,7 @@
       launchPinned: $('launchPinned'),
       launchInBackground: $('launchInBackground'),
       executionMode: $('executionMode'),
+      filterPlan: $('filterPlan'),
       snipeMaxAgeSeconds: $('snipeMaxAgeSeconds'),
       snipeMinVelocity: $('snipeMinVelocity'),
       snipeMaxTop10Pct: $('snipeMaxTop10Pct'),
@@ -211,6 +212,9 @@
     UI.settings.launchPinned.checked = !!settings.launchPinned;
     UI.settings.launchInBackground.checked = !!settings.launchInBackground;
     UI.settings.executionMode.value = settings.executionMode || 'paper';
+    if (UI.settings.filterPlan) {
+      UI.settings.filterPlan.value = settings.filterPlan || 'balanced';
+    }
     UI.settings.snipeMaxAgeSeconds.value = String(toNumberOr(settings.snipeFilters?.maxAgeSeconds, 120));
     UI.settings.snipeMinVelocity.value = String(toNumberOr(settings.snipeFilters?.minVelocity, 0.03));
     UI.settings.snipeMaxTop10Pct.value = String(toNumberOr(settings.snipeFilters?.maxTop10Pct, 15));
@@ -263,28 +267,47 @@
 
     tokens.forEach((token) => {
       const advancedEnabled = state.latest?.settings?.showAdvancedData !== false;
+      const passed = token.matchesFilters !== false;
+      const score = token.filterScore ?? 0;
+      const scoreColor = score >= 90 ? 'var(--green)' : score >= 70 ? 'var(--amber)' : 'var(--red)';
+      const barWidth = Math.max(0, Math.min(100, score));
+
       const card = document.createElement('article');
-      card.className = 'card';
+      card.className = `card ${passed ? 'pass' : 'fail'}`;
       card.innerHTML = `
         <div class="card-head">
           <div class="pair">
-            <strong class="ticker mono">${escapeHtml(token.ticker || 'UNKNOWN')}</strong>
-            <span class="name">${escapeHtml(token.name || token.platform || '')}</span>
+            <strong class="ticker mono">${escapeHtml(token.ticker || '???')}</strong>
+            <span class="name">${escapeHtml(token.name || '')}</span>
           </div>
+          <span class="card-age mono">${escapeHtml(token.age || '—')}</span>
         </div>
-        <div class="name">${token.matchesFilters === false ? 'Filtered Out (included by scope=all)' : 'Filter Matched'}</div>
+        <div class="filter-badge mono ${passed ? 'pass-badge' : 'fail-badge'}">
+          <span style="color:${passed ? 'var(--green)' : 'var(--red)'}">${passed ? '✓ PASS' : '✗ FAIL'}${token.filterAction && token.filterAction !== 'skip' ? ' · ' + token.filterAction : ''}</span>
+          <span style="display:flex;align-items:center;gap:4px">
+            <span class="filter-score" style="color:${scoreColor}">${score}</span>
+            <span class="score-bar"><span class="score-bar-fill" style="width:${barWidth}%;background:${scoreColor}"></span></span>
+          </span>
+        </div>
         <div class="coin-chart-wrap" aria-hidden="true">
           <canvas class="coin-chart" data-token-id="${escapeHtml(token.tokenId)}" role="img"></canvas>
         </div>
         <div class="metrics mono">
-          <div class="metric"><span>Market Cap</span><strong>${escapeHtml(token.marketCap || '—')}</strong></div>
-          <div class="metric"><span>Liquidity</span><strong>${escapeHtml(token.liquidity || '—')}</strong></div>
-          <div class="metric"><span>Volume</span><strong>${escapeHtml(token.volume || '—')}</strong></div>
+          <div class="metric"><span>MC</span><strong>${escapeHtml(token.marketCap || '—')}</strong></div>
+          <div class="metric"><span>VOL</span><strong>${escapeHtml(token.volume || '—')}</strong></div>
+          <div class="metric"><span>LIQ / FUND</span><strong>${escapeHtml(token.liquidity || token.funding || '—')}</strong></div>
+        </div>
+        <div class="metrics mono">
+          <div class="metric"><span>TX (B/S)</span><strong>${escapeHtml(token.txTotal || '—')}${token.buyRatio ? ' · ' + escapeHtml(token.buyRatio) : ''}</strong></div>
+          <div class="metric"><span>NET FLOW</span><strong style="color:${(token.netFlow || '').startsWith('+') || (token.netFlow || '').startsWith('$') ? 'var(--green)' : (token.netFlow || '').startsWith('-') ? 'var(--red)' : 'inherit'}">${escapeHtml(token.netFlow || '—')}</strong></div>
+          <div class="metric"><span>HOLDERS</span><strong>${escapeHtml(token.holders || '—')}</strong></div>
         </div>
         ${advancedEnabled ? renderAdvancedDetails(token) : ''}
+        ${renderSocialRow(token)}
+        ${renderBadgeRow(token)}
         <div class="actions">
-          <button class="secondary" data-action="watch" data-token-id="${escapeHtml(token.tokenId)}">${context === 'watch' ? 'Unwatch' : 'Watch'}</button>
-          <button class="primary" data-action="buy" data-token-id="${escapeHtml(token.tokenId)}">Buy</button>
+          <button class="secondary" data-action="watch" data-token-id="${escapeHtml(token.tokenId)}">${context === 'watch' ? '✕ Unwatch' : '★ Watch'}</button>
+          <button class="primary" data-action="buy" data-token-id="${escapeHtml(token.tokenId)}">⚡ Buy</button>
         </div>
       `;
       card.dataset.tokenId = token.tokenId;
@@ -296,53 +319,73 @@
     drawTokenCharts(container);
   }
 
+  function renderSocialRow(token) {
+    const pills = [];
+    if (token.twitterHandle) {
+      pills.push(`<span class="social-pill"><span class="icon">𝕏</span>${escapeHtml(token.twitterHandle)}${token.twitterFollowers ? ' · ' + escapeHtml(token.twitterFollowers) : ''}</span>`);
+    }
+    if (token.websiteLink) {
+      pills.push(`<span class="social-pill"><span class="icon">🌐</span>Website</span>`);
+    }
+    if (token.socialLink && !token.twitterHandle) {
+      pills.push(`<span class="social-pill"><span class="icon">🔗</span>Social</span>`);
+    }
+    if (!pills.length) return '';
+    return `<div class="social-row">${pills.join('')}</div>`;
+  }
+
+  function classifyBadge(label, value) {
+    const num = parseFloat(String(value).replace('%', ''));
+    if (isNaN(num)) return 'badge-neutral';
+    // Context-specific thresholds
+    switch (label) {
+      case 'DEV': return num <= 3 ? 'badge-safe' : num <= 7 ? 'badge-warn' : 'badge-danger';
+      case 'RAT': return num <= 5 ? 'badge-safe' : num <= 15 ? 'badge-warn' : 'badge-danger';
+      case 'BUNDLE': return num <= 2 ? 'badge-safe' : num <= 8 ? 'badge-warn' : 'badge-danger';
+      case 'INSIDER': return num <= 5 ? 'badge-safe' : num <= 10 ? 'badge-warn' : 'badge-danger';
+      case 'SNIPER': return num <= 8 ? 'badge-safe' : num <= 15 ? 'badge-warn' : 'badge-danger';
+      case 'TOP': return num <= 25 ? 'badge-safe' : num <= 38 ? 'badge-warn' : 'badge-danger';
+      default: return 'badge-neutral';
+    }
+  }
+
+  function renderBadgeRow(token) {
+    const badges = [];
+    const add = (label, val) => {
+      if (val && val !== '—' && val !== '0' && val !== '0%') {
+        badges.push(`<span class="badge-pill mono ${classifyBadge(label, val)}">${label} ${escapeHtml(val)}</span>`);
+      }
+    };
+    add('DEV', token.devPct || token.devSoldPct);
+    if (token.devSoldAge) badges.push(`<span class="badge-pill mono badge-neutral">DS ${escapeHtml(token.devSoldAge)}</span>`);
+    add('RAT', token.ratPct);
+    add('BUNDLE', token.bundlePct || token.bundlersPct);
+    add('INSIDER', token.insiderPct);
+    add('SNIPER', token.sniperPct);
+    add('TOP', token.topHolders || token.top10Pct);
+    if (token.bluechipPct && token.bluechipPct !== '0' && token.bluechipPct !== '0%') {
+      badges.push(`<span class="badge-pill mono badge-safe">💎 ${escapeHtml(token.bluechipPct)}</span>`);
+    }
+    if (!badges.length) return '';
+    return `<div class="badges-row">${badges.join('')}</div>`;
+  }
+
   function renderAdvancedDetails(token) {
-    // Determine which extra fields are available (GMGN cards provide more data)
     const hasGmgnData = !!(token.smartMoney || token.netFlow || token.twitterHandle || token.watchers);
 
     let html = `
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📈</span>TXNS</span><strong>${escapeHtml(token.txTotal || '—')}${token.buyRatio ? ` (${escapeHtml(token.buyRatio)} buy)` : ''}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">⚖️</span>Buys/Sells</span><strong>${escapeHtml([token.txBuys || '—', token.txSells || '—'].join('/'))}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👑</span>Top Holders</span><strong>${escapeHtml(token.topHolders || token.top10Pct || '—')}</strong></div>
-      </div>
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">📦</span>Bundlers</span><strong>${escapeHtml(token.bundlePct || token.bundlersPct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🧑‍💻</span>Dev/Insider</span><strong>${escapeHtml(token.insiderPct || token.devPct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🎯</span>Snipers/Bots</span><strong>${escapeHtml([token.sniperPct || '—', token.botCount || token.botPct || '—'].join('/'))}</strong></div>
-      </div>
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👥</span>Holders</span><strong>${escapeHtml(token.holders || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🧠</span>Pro Traders</span><strong>${escapeHtml(token.proTraders || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">✅</span>DEX Paid</span><strong>${escapeHtml(token.dexPaid || '—')}</strong></div>
+      <div class="metrics mono">
+        <div class="metric"><span>BUYS / SELLS</span><strong>${escapeHtml([token.txBuys || '—', token.txSells || '—'].join(' / '))}</strong></div>
+        <div class="metric"><span>TOP HOLDERS</span><strong>${escapeHtml(token.topHolders || token.top10Pct || '—')}</strong></div>
+        <div class="metric"><span>BUNDLERS</span><strong>${escapeHtml(token.bundlePct || token.bundlersPct || '—')}</strong></div>
       </div>`;
 
     if (hasGmgnData) {
       html += `
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💎</span>Smart $</span><strong>${escapeHtml(token.smartMoney || '0')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🔥</span>KOL/Degen</span><strong>${escapeHtml(token.smartDegen || '0')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👁</span>Watchers</span><strong>${escapeHtml(token.watchers || '0')}</strong></div>
-      </div>
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💰</span>Net Flow</span><strong>${escapeHtml(token.netFlow || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🏦</span>Funding</span><strong>${escapeHtml(token.funding || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">☁️</span>Dev Sold</span><strong>${escapeHtml(token.devSoldAge || '—')}</strong></div>
-      </div>`;
-
-      if (token.twitterHandle) {
-        html += `
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric" style="flex:2"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🐦</span>Twitter</span><strong>${escapeHtml(token.twitterHandle)}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">👤</span>Followers</span><strong>${escapeHtml(token.twitterFollowers || '0')}</strong></div>
-      </div>`;
-      }
-
-      html += `
-      <div class="metrics mono" style="margin-top:8px;">
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">🐀</span>Rat %</span><strong>${escapeHtml(token.ratPct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💎</span>BlueChip</span><strong>${escapeHtml(token.bluechipPct || '—')}</strong></div>
-        <div class="metric"><span class="metric-label"><span class="metric-icon" aria-hidden="true">💬</span>Replies</span><strong>${escapeHtml(token.pumpReplies || '—')}</strong></div>
+      <div class="metrics mono">
+        <div class="metric"><span>💎 SMART $</span><strong style="color:var(--green)">${escapeHtml(token.smartMoney || '0')}</strong></div>
+        <div class="metric"><span>🔥 KOL</span><strong>${escapeHtml(token.smartDegen || '0')}</strong></div>
+        <div class="metric"><span>👁 WATCHERS</span><strong>${escapeHtml(token.watchers || '0')}</strong></div>
       </div>`;
     }
 
@@ -455,6 +498,7 @@
           launchPinned: !!UI.settings.launchPinned.checked,
           launchInBackground: !!UI.settings.launchInBackground.checked,
           executionMode: UI.settings.executionMode.value === 'live' ? 'live' : 'paper',
+          filterPlan: (UI.settings.filterPlan && UI.settings.filterPlan.value) || 'balanced',
           snipeFilters: {
             maxAgeSeconds: toNumberOr(UI.settings.snipeMaxAgeSeconds.value, 120),
             minVelocity: toNumberOr(UI.settings.snipeMinVelocity.value, 0.03),

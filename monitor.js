@@ -104,6 +104,72 @@ const CLI_TICK_SUMMARY_MS = Number(process.env.CLI_TICK_SUMMARY_MS || 1800);
 const CLI_ERROR_DEDUP_MS = Number(process.env.CLI_ERROR_DEDUP_MS || 5000);
 const SESSION_LOGS_ENABLED = process.env.SESSION_LOGS !== '0';
 const SESSION_LOG_DIR = process.env.SESSION_LOG_DIR || path.join(process.cwd(), 'logs', 'sessions');
+const FILTER_LOG_DIR = process.env.FILTER_LOG_DIR || path.join(process.cwd(), 'filter_logs');
+let filterLogStream = null;
+let filterLogSessionFile = '';
+let filterDecisionCount = 0;
+let filterPassCount = 0;
+let filterFailCount = 0;
+
+function ensureFilterLogging() {
+    if (filterLogStream) return;
+    try {
+        fs.mkdirSync(FILTER_LOG_DIR, { recursive: true });
+        const sessionId = new Date().toISOString().replace(/[:.]/g, '-');
+        filterLogSessionFile = path.join(FILTER_LOG_DIR, `filter_${sessionId}.jsonl`);
+        filterLogStream = fs.createWriteStream(filterLogSessionFile, { flags: 'a' });
+    } catch (err) {
+        status(`Filter log init failed: ${err.message}`);
+    }
+}
+
+function handleFilterDecision(decision) {
+    ensureFilterLogging();
+    filterDecisionCount++;
+
+    if (decision.passes_rules) {
+        filterPassCount++;
+    } else {
+        filterFailCount++;
+    }
+
+    // Write to JSONL file
+    if (filterLogStream) {
+        try {
+            filterLogStream.write(JSON.stringify(decision) + '\n');
+        } catch { }
+    }
+
+    // Show in CLI activity feed
+    const ticker = decision.ticker || shortMint(decision.token_ca || '');
+    const score = decision.score || 0;
+    const plan = decision.plan_used || 'balanced';
+    const action = decision.action || 'skip';
+    const flags = (decision.risk_flags || []).length;
+    const ts = eventTime(new Date().toISOString());
+
+    if (decision.passes_rules) {
+        pushRecentImportant(`[${ts}] ✅ PASS ${ticker} | ${plan} | score:${score} | ${action} | flags:${flags}`);
+    } else {
+        // Only show fails occasionally to avoid noise
+        if (filterFailCount % 5 === 0) {
+            pushRecentImportant(`[${ts}] ❌ ${filterFailCount} tokens failed (last: ${ticker} score:${score})`);
+        }
+    }
+
+    // Log to session events for post-analysis
+    recordSessionEvent('filter_decision', {
+        ts: new Date().toISOString(),
+        token_ca: decision.token_ca,
+        ticker: decision.ticker,
+        plan: decision.plan_used,
+        passed: decision.passes_rules,
+        score: decision.score,
+        action: decision.action,
+        critical_fails: decision.critical_fails,
+        flags: decision.risk_flags
+    });
+}
 
 const orchestrator = {
     connection: null,
@@ -2238,6 +2304,11 @@ function startIpcServer() {
 
                 if (msg.type === 'metadata' || msg.type === 'token_metadata') {
                     mergeMetadata(msg.payload || msg);
+                    return;
+                }
+
+                if (msg.type === 'filter_decision') {
+                    handleFilterDecision(msg.payload || {});
                     return;
                 }
 
