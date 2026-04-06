@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "gmgn-market": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "computedHash": "0ff5cdd928be3c1c9484eacb9f88e6bf6b53c02f47323ab682bb4ccb87658627"
+    }
+  }
+}
