@@ -17,6 +17,9 @@
       },
       "auditRules": ["honeypot", "mintAuthorityEnabled", "freezeAuthorityEnabled"]
     },
+
+
+    
     "gmgn": {
       "hosts": ["gmgn.ai"],
       "listContainer": ".g-table-body",
